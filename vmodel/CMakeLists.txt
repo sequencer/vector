@@ -8,6 +8,9 @@ FetchContent_Declare(glog GIT_REPOSITORY https://github.com/google/glog GIT_TAG 
 FetchContent_MakeAvailable(fmt glog)
 
 find_package(verilator)
-add_executable(Vlane src/LaneModel.cpp src/Main.cpp)
+add_executable(Vlane LaneModel/LaneModel.cpp)
 verilate(Vlane SOURCES ../builds/Lane.v)
 target_link_libraries(Vlane fmt glog)
+
+add_executable(InterLaneModel InterLaneModel/Main.cpp InterLaneModel/State.cpp)
+target_link_libraries(InterLaneModel fmt glog)
