@@ -1,0 +1,6 @@
+out/
+test_run_dir/
+.bsp/
+.idea/
+.metals/
+.vscode/

@@ -1,0 +1,27 @@
+on: [pull_request]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cachix/install-nix-action@v14
+        with:
+          # Update instructions:
+          # https://github.com/cachix/install-nix-action#usage-with-flakes
+          install_url: https://nixos-nix-install-tests.cachix.org/serve/sz37f7h0fr99jh1qppjwlprygmdmiyrw/install
+          install_options: --tarball-url-prefix https://nixos-nix-install-tests.cachix.org/serve
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Install dependencies
+        run: |
+          # Lock to z3 version 4.8.10 in old version of nixos-unstable
+          # Update instructions: Find URL with:
+          # nix flake metadata github:NixOS/nixpkgs/{branch-name}
+          nix profile install -vL github:NixOS/nixpkgs/860b56be91fb874d48e23a950815969a7b832fbc#z3 github:NixOS/nixpkgs/nixos-unstable#{gnumake,mill}
+
+      - uses: actions/checkout@v2
+
+      - name: Check Format
+        run: make checkformat
+      - name: Test
+        run: make init && make test
