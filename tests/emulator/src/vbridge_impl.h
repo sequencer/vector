@@ -79,6 +79,9 @@ private:
   /// note: this is not the real system cycles, scalar instructions is evaulated via spike, which is not recorded.
   uint64_t timeout{};
 
+  // This flag will be set to true when we see a msimend write insn.
+  bool is_spike_exited = false;
+
   inline void reset();
 
   insn_fetch_t fetch_proc_insn();

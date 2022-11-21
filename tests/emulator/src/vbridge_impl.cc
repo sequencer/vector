@@ -174,11 +174,6 @@ void VBridgeImpl::run() {
       // in the RTL thread, for each RTL cycle, valid signals should be checked, generate events, let testbench be able
       // to check the correctness of RTL behavior, benchmark performance signals.
       SpikeEvent *se_to_issue = find_se_to_issue();
-      if (se_to_issue->is_exit_insn) {
-        // The exit insn is always the last one to handle, we return from here to end simulation.
-        LOG(INFO) << fmt::format("[{}] all insn in to_rtl_queue are issued, exiting", get_t());
-        return;
-      }
 
       se_to_issue->drive_rtl_req(top);
       se_to_issue->drive_rtl_csr(top);
@@ -227,7 +222,14 @@ void VBridgeImpl::run() {
       }
     }
 
-    LOG(INFO) << fmt::format("[{}] all insn in to_rtl_queue are issued, restarting spike", get_t());
+    LOG(INFO) << fmt::format("[{}] all insn in to_rtl_queue are issued", get_t());
+    if (is_spike_exited) {
+      // TODO: loop while there exists (uncommitted) insn in queue.
+      LOG(INFO) << fmt::format("exiting spike");
+      return;
+    } else {
+      LOG(INFO) << fmt::format("restarting spike");
+    }
   }
 }
 
@@ -361,16 +363,20 @@ void VBridgeImpl::loop_until_se_queue_full() {
     try {
       if (auto spike_event = spike_step()) {
         SpikeEvent &se = spike_event.value();
-        to_rtl_queue.push_front(std::move(se));
 
-        if (se.is_exit_insn) break;
+        if (se.is_exit_insn) {
+          is_spike_exited = true;
+          LOG(INFO) << fmt::format("spike encounter exit insn, stop enqueuing.");
+          return;
+        }
+
+        to_rtl_queue.push_front(std::move(se));
       }
     } catch (trap_t &trap) {
       LOG(FATAL) << fmt::format("spike trapped with {}", trap.name());
     }
   }
   LOG(INFO) << fmt::format("to_rtl_queue is full now, start to simulate.");
-
 }
 
 SpikeEvent *VBridgeImpl::find_se_to_issue() {
