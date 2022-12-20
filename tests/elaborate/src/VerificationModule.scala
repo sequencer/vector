@@ -50,8 +50,13 @@ class VerificationModule(dut: V) extends TapModule {
          |
          |  export "DPI-C" function dpiDumpWave;
          |  function dpiDumpWave(input string file);
+         |  `ifdef COSIM_VERILATOR
          |   $$dumpfile(file);
          |   $$dumpvars(2, $$root.dut);
+         |   `elsif COSIM_VCS
+         |   $$fsdbDumpfile(file);
+         |   $$fsdbDumpvars(0);
+         |   `endif
          |  endfunction;
          |
          |  export "DPI-C" function dpiFinish;
@@ -217,10 +222,10 @@ class VerificationModule(dut: V) extends TapModule {
       s"$desiredName.sv",
       s"""module $desiredName(
          |  input clock,
-         |  output [31:0] request_instruction,
-         |  output [${dut.parameter.xLen - 1}:0] request_src1Data,
-         |  output [${dut.parameter.xLen - 1}:0] request_src2Data,
-         |  output instructionValid,
+         |  output bit[31:0] request_instruction,
+         |  output bit[${dut.parameter.xLen - 1}:0] request_src1Data,
+         |  output bit[${dut.parameter.xLen - 1}:0] request_src2Data,
+         |  output bit instructionValid,
          |
          |  output bit[${csrInterface.vl.getWidth - 1}:0] csrInterface_vl,
          |  output bit[${csrInterface.vStart.getWidth - 1}:0] csrInterface_vStart,
@@ -231,7 +236,7 @@ class VerificationModule(dut: V) extends TapModule {
          |  output bit csrInterface_vma,
          |  output bit csrInterface_ignoreException,
          |
-         |  input respValid,
+         |  input bit respValid,
          |  input bit[${response.getWidth - 1}:0] response_data
          |);
          |import "DPI-C" function void $desiredName(
@@ -249,7 +254,7 @@ class VerificationModule(dut: V) extends TapModule {
          |  output bit vma,
          |  output bit ignoreException,
          |
-         |  input respValid,
+         |  input bit respValid,
          |  input bit[${response.getWidth - 1}:0] response_data
          |);
          |always @ (posedge clock) #($latPokeInst) $desiredName(
@@ -290,11 +295,11 @@ class VerificationModule(dut: V) extends TapModule {
       s"$desiredName.sv",
       s"""module $desiredName(
          |  input clock,
-         |  input ready,
+         |  input bit ready,
          |  input bit[${issueIdx.getWidth - 1}:0] issueIdx
          |);
          |import "DPI-C" function void $desiredName(
-         |  input ready,
+         |  input bit ready,
          |  input bit[${issueIdx.getWidth - 1}:0] issueIdx
          |);
          |always @ (posedge clock) #($latPeekIssue) $desiredName(
