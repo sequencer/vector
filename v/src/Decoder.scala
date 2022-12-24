@@ -69,7 +69,7 @@ object InstructionDecodeTable {
   }
 
   def values(op: Op, special: Option[SpecialAux]): Seq[String] = {
-    op.funct3s.filter(_ != " ").map(x => value(op, special, funct3Map(op.tpe + x)).toString)
+    op.funct3s.filter(_ != " ").map(x => value(op, special, x).toString)
   }
 
   val logic: Seq[String] = Seq(
@@ -195,7 +195,7 @@ object InstructionDecodeTable {
         b2s(special.get.name == "VXUNARY0") +
         b2s(op.name.startsWith("vmv")) +
         b2s(ffoUnit) +
-        b2s(op.name == "vcpop") +
+        b2s(op.name == "vpopc") +
         b2s(op.name == "viota") +
         b2s(op.name == "vid") +
         b2s(funct3 == "V")
