@@ -42,7 +42,7 @@ object InstructionDecodeTable {
     val sp = specialOps.find(_.name == op.name).get
 
     sp.ops.map(x => {
-      (op.copy(name = x._1), Some(SpecialAux(sp.name, sp.vs.toInt, x._2)))
+      (op.copy(name = x._2), Some(SpecialAux(sp.name, sp.vs.toInt, x._1)))
     })
   }
 
@@ -57,7 +57,7 @@ object InstructionDecodeTable {
   )
 
   def keys(op: Op, aux: Option[SpecialAux]): Seq[String] = {
-    op.funct3s.filter(_ == " ").map(x =>
+    op.funct3s.filter(_ != " ").map(x =>
       op.funct6 +                                  // funct6
       "?" +                                        // always '?', but why?
       (if (aux.isEmpty || aux.get.vs == 1) "?????"
@@ -69,7 +69,7 @@ object InstructionDecodeTable {
   }
 
   def values(op: Op, special: Option[SpecialAux]): Seq[String] = {
-    op.funct3s.filter(_ == " ").map(x => value(op, special, funct3Map(op.tpe + x)).toString)
+    op.funct3s.filter(_ != " ").map(x => value(op, special, funct3Map(op.tpe + x)).toString)
   }
 
   val logic: Seq[String] = Seq(
@@ -208,9 +208,14 @@ object InstructionDecodeTable {
   }
 
   def table: List[(BitPat, BitPat)] = {
+      Decoder.ops.zipWithIndex.map { x =>
+      // vmv<nr>r's funct6 is empty and needs special handling.
+      if (x._1.name == "vmv<nr>r") x._1.copy(funct6 = Decoder.ops(x._2-1).funct6)
+      else x._1
+    }
     // TODO: floating point instructions are not supported for now.
-    Decoder.ops.filter(_.tpe != "F").flatMap(expand(_, Decoder.specialOps)).flatMap(
+    .filter(_.tpe != "F").flatMap(expand(_, Decoder.specialOps)).flatMap(
       x => keys(x._1, x._2).zip(values(x._1, x._2))
-    ).map(x => (BitPat(x._1), BitPat(x._2))).toList
+    ).map(x => (BitPat("b" + x._1), BitPat("b" + x._2))).toList
   }
 }
