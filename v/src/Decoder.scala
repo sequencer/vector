@@ -1,10 +1,14 @@
 package v
 
 import chisel3.util.BitPat
+import chisel3.util.experimental.decode.TruthTable
 
+import scala.collection.immutable.SeqMap
 import scala.util.matching.Regex
 
-case class Op(tpe: String, funct6: String, funct3s: Seq[String], name: String)
+case class Op(tpe: String, funct6: String, funct3s: Seq[String], name: String) {
+  def bitpat: BitPat = BitPat("")
+}
 
 case class SpecialOp(name: String, vs: String, ops: Seq[(String, String)])
 
@@ -58,13 +62,13 @@ object InstructionDecodeTable {
 
   def keys(op: Op, aux: Option[SpecialAux]): Seq[String] = {
     op.funct3s.filter(_ != " ").map(x =>
-      op.funct6 +                                  // funct6
-      "?" +                                        // always '?', but why?
-      (if (aux.isEmpty || aux.get.vs == 1) "?????"
-      else aux.get.value) +                        // vs2
-      (if (aux.isEmpty || aux.get.vs == 2) "?????"
-      else aux.get.value) +                        // vs1
-      funct3Map(op.tpe + x)                        // funct3
+      op.funct6 + // funct6
+        "?" + // always '?', but why?
+        (if (aux.isEmpty || aux.get.vs == 1) "?????"
+        else aux.get.value) + // vs2
+        (if (aux.isEmpty || aux.get.vs == 2) "?????"
+        else aux.get.value) + // vs1
+        funct3Map(op.tpe + x) // funct3
     )
   }
 
@@ -99,7 +103,7 @@ object InstructionDecodeTable {
   )
 
   case class Value(units: String, uop: String, controls: String,
-                 v: Boolean, x: Boolean, i: Option[Boolean]) {
+                   v: Boolean, x: Boolean, i: Option[Boolean]) {
     require(units.length == 6)
     require(uop.length == 4)
     require(controls.length == 12)
@@ -127,7 +131,7 @@ object InstructionDecodeTable {
       b2s(logicUnit) + b2s(addUnit) + b2s(shiftUnit) + b2s(mulUnit) + b2s(divUnit) + b2s(otherUnit)
     } else "000001"
     val uop = if (special.isEmpty) {
-      if (mulUnit){
+      if (mulUnit) {
         val high = op.name.contains("mulh")
         val n = if (high) 3 else firstIndexContains(mul2, op.name)
         require(n < 4)
@@ -136,7 +140,7 @@ object InstructionDecodeTable {
       } else if (divUnit) {
         val n = firstIndexContains(div, op.name)
         require(n < 2)
-        "?"*3 + n.toBinaryString
+        "?" * 3 + n.toBinaryString
       } else if (addUnit) {
         val n = if (op.name.contains("sum")) 0 else firstIndexContains(add, op.name)
         require(n < 16)
@@ -152,15 +156,15 @@ object InstructionDecodeTable {
       } else if (shiftUnit) {
         val n = firstIndexContains(shift, op.name)
         require(n < 4)
-        "?"*2 + ("00" + n.toBinaryString takeRight 2)
+        "?" * 2 + ("00" + n.toBinaryString takeRight 2)
       } else if (otherUnit) {
-        val n =firstIndexContains(other, op.name)
+        val n = firstIndexContains(other, op.name)
         require(n < 8)
         "0" + ("000" + n.toBinaryString takeRight 3)
       } else {
         // unreachable
         require(false)
-        "?"*4
+        "?" * 4
       }
     } else
       "1" + (
@@ -168,11 +172,11 @@ object InstructionDecodeTable {
           "?" +
             ("00" + ffo.indexOf(op.name).toBinaryString takeRight 2)
         else if (special.get.name == "VXUNARY0") {
-          val log2 = (x: Int) => (math.log10(x)/math.log10(2)).toInt
+          val log2 = (x: Int) => (math.log10(x) / math.log10(2)).toInt
           b2s(op.name.startsWith("vs")) +
             ("00" + log2(op.name.last.toString.toInt).toBinaryString takeRight 2)
         } else
-          "?"*3
+          "?" * 3
         )
 
     val nameWoW = op.name.replace(".w", "")
@@ -190,7 +194,7 @@ object InstructionDecodeTable {
         b2s(nameWoW.endsWith("us") || (nameWoW.endsWith("u") && !nameWoW.endsWith("su"))) +
         b2s(nameWoW.endsWith("u"))
     else
-      "?"*4 +
+      "?" * 4 +
         b2s(special.get.name == "VWXUNARY0") +
         b2s(special.get.name == "VXUNARY0") +
         b2s(op.name.startsWith("vmv")) +
@@ -208,14 +212,104 @@ object InstructionDecodeTable {
   }
 
   def table: List[(BitPat, BitPat)] = {
-      Decoder.ops.zipWithIndex.map { x =>
-      // vmv<nr>r's funct6 is empty and needs special handling.
-      if (x._1.name == "vmv<nr>r") x._1.copy(funct6 = Decoder.ops(x._2-1).funct6)
+    Decoder.ops.zipWithIndex.map { x =>
+      // vmv<nr>r's funct6 is empty and needs special hfandling.
+      if (x._1.name == "vmv<nr>r") x._1.copy(funct6 = Decoder.ops(x._2 - 1).funct6)
       else x._1
     }
-    // TODO: floating point instructions are not supported for now.
-    .filter(_.tpe != "F").flatMap(expand(_, Decoder.specialOps)).flatMap(
+      // TODO: floating point instructions are not supported for now.
+      .filter(_.tpe != "F").flatMap(expand(_, Decoder.specialOps)).flatMap(
       x => keys(x._1, x._2).zip(values(x._1, x._2))
     ).map(x => (BitPat("b" + x._1), BitPat("b" + x._2))).toList
   }
+}
+
+import chisel3._
+
+trait Field {
+  def width: Int
+
+  def genTable(op: Op): BitPat
+
+  def dc: BitPat = BitPat.dontCare(width)
+}
+
+trait BoolField extends Field {
+  def width: Int = 1
+
+  def y: BitPat = BitPat.Y(1)
+
+  def n: BitPat = BitPat.N(1)
+
+}
+
+class DecodeBundle(fields: Seq[Field]) extends Record with chisel3.experimental.AutoCloneType {
+  override def elements: SeqMap[String, UInt] = fields.map(k => k.toString -> UInt(k.width.W)).to(SeqMap)
+  def apply(field: Field): UInt = elements(field.toString)
+}
+
+object DecodeTable {
+  object uop extends Field {
+    def width: Int = 4
+
+    def and: BitPat = BitPat("b0000")
+
+    def nand: BitPat = BitPat("b0001")
+
+    def andn: BitPat = BitPat("b0010")
+
+    def or: BitPat = BitPat("b0011")
+
+    def nor: BitPat = BitPat("b0100")
+
+    def orn: BitPat = BitPat("b0101")
+
+    def xor: BitPat = BitPat("b0110")
+
+    def xnor: BitPat = BitPat("b0111")
+  }
+
+  object logic extends BoolField {
+    def genTable(op: Op): BitPat = op.name match {
+      case s"and" => y
+      case _ => dc
+    }
+  }
+
+  val all = Seq(uop, logic)
+
+  def bundle = new DecodeBundle(all)
+
+  def table = {
+    val result = Decoder.ops.map { instruction =>
+      instruction.bitpat -> all.map(_.genTable(instruction)).reduce(_ ## _)
+    }.to(SeqMap)
+    TruthTable(result, BitPat.dontCare(result.head._2.getWidth))
+  }
+
+  "adderUnit"
+  "shiftUnit"
+  "mulUnit"
+  "divUnit"
+  "otherUnit"
+  "firstWiden"
+  "nr"
+  "red"
+  "reverse"
+  "narrow"
+  "widen"
+  "average"
+  "unSigned0"
+  "unSigned1"
+  "vType"
+  "xType"
+  "uop"
+  "targetRD"
+  "vExtend"
+  "mv"
+  "ffo"
+  "popCount"
+  "viota"
+  "vid"
+  "specialUop"
 }
