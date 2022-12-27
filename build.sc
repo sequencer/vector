@@ -183,6 +183,7 @@ object tests extends Module {
         "--split-verilog",
         "--preserve-values=named",
         "--output-annotation-file=mfc.anno.json",
+        "--lowering-options=verifLabels",
         s"-o=${T.dest}"
       ).call(T.dest)
       PathRef(T.dest)
@@ -230,6 +231,9 @@ object tests extends Module {
         "--max-num-width 1048576",
         "--main",
         "--timing",
+        // use for coverage
+        "--coverage-user",
+        "--assert",
         // format: on
       )
     }

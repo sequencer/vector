@@ -55,6 +55,9 @@ public:
   uint64_t getCycle() {
     return ctx->time();
   }
+  VerilatedCovContext* getCoverage() {
+    return ctx->coveragep();
+  }
 #endif
 
   void dpiPokeInst(const VInstrInterfacePoke &v_instr, const VCsrInterfacePoke &v_csr, const VRespInterface &v_resp);
