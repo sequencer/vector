@@ -33,6 +33,11 @@
           devShell = pkgs.mkShell.override { stdenv = pkgs.myLLVM.stdenv; } {
             buildInputs = deps;
           };
+          devShells.docBuild = pkgs.mkShell {
+            buildInputs = with pkgs; [
+              yarn
+            ];
+          };
         }
       )
     // { inherit inputs; overlays.default = overlay; };

@@ -95,7 +95,7 @@ permutation
 
 #### 2.结构
 
-![](./rvv-lane.drawio.svg)
+![](assets/rvv-lane.drawio.svg)
 
 * 如图, 进lane把所有数据广播给所有的执行单元, 然后根据控制逻辑决定是否需要计算(执行单元可能需要在不是自己的请求的时候把输入拉0)
 * 然后根据控制从多个结果中选一个出来写到寄存器里面, 然后做一些通用的处理(widen, extend...)

@@ -1,0 +1,7 @@
+{
+  "name": "doc",
+  "version": "0.1.0",
+  "devDependencies": {
+    "honkit": "^4.0.4"
+  }
+}
