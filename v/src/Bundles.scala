@@ -2,39 +2,38 @@ package v
 
 import chisel3._
 import chisel3.util.{Decoupled, DecoupledIO, Valid, ValidIO}
-
-class VReq(param: VParam) extends Bundle {
-  val inst:     UInt = UInt(32.W)
-  val src1Data: UInt = UInt(param.XLEN.W)
-  val src2Data: UInt = UInt(param.XLEN.W)
+class VRequest(xLen: Int) extends Bundle {
+  val instruction: UInt = UInt(32.W)
+  val src1Data:    UInt = UInt(xLen.W)
+  val src2Data:    UInt = UInt(xLen.W)
 }
 
-class VResp(param: VParam) extends Bundle {
+class VResponse(xLen: Int) extends Bundle {
   // todo: vector解出来是否需要写rd？
-  val data: UInt = UInt(param.XLEN.W)
+  val data: UInt = UInt(xLen.W)
 }
 
-class InstRecord(param: VParam) extends Bundle {
-  val instIndex: UInt = UInt(param.instIndexSize.W)
-  val vrfWrite:  Bool = Bool()
+class InstructionRecord(instructionIndexWidth: Int) extends Bundle {
+  val instructionIndex: UInt = UInt(instructionIndexWidth.W)
+  val vrfWrite:         Bool = Bool()
 
   /** Whether operation is widen */
-  val w: Bool = Bool()
+  val widen: Bool = Bool()
 
   /** Whether operation is narrowing */
-  val n: Bool = Bool()
+  val narrowing: Bool = Bool()
   // load | store
-  val ls: Bool = Bool()
+  val loadStore: Bool = Bool()
 }
 
-class InstState extends Bundle {
+class InstructionState extends Bundle {
   val wLast:    Bool = Bool()
   val idle:     Bool = Bool()
   val sExecute: Bool = Bool()
   val sCommit:  Bool = Bool()
 }
 
-class specialInstructionType extends Bundle {
+class SpecialInstructionType extends Bundle {
   val red:      Bool = Bool()
   val compress: Bool = Bool()
   val viota:    Bool = Bool()
@@ -42,10 +41,12 @@ class specialInstructionType extends Bundle {
   val other: Bool = Bool()
 }
 
-class InstControl(param: VParam) extends Bundle {
-  val record: InstRecord = new InstRecord(param)
-  val state:  InstState = new InstState
-  val endTag: Vec[Bool] = Vec(param.lane + 1, Bool())
+class InstructionControl(instIndexWidth: Int, laneSize: Int) extends Bundle {
+  val record: InstructionRecord = new InstructionRecord(instIndexWidth)
+  val state:  InstructionState = new InstructionState
+
+  /** tag for recording each lane and lsu is finished for this instruction. */
+  val endTag: Vec[Bool] = Vec(laneSize + 1, Bool())
 }
 
 class InstructionDecodeResult extends Bundle {
@@ -72,7 +73,8 @@ class InstructionDecodeResult extends Bundle {
   val vType: Bool = Bool()
   val xType: Bool = Bool()
   val iType: Bool = Bool()
-  val uop:   UInt = UInt(4.W)
+  // TODO: no magic number
+  val uop: UInt = UInt(4.W)
 }
 
 class ExtendInstructionDecodeResult extends Bundle {
@@ -101,10 +103,15 @@ class ExtendInstructionType extends Bundle {
   val vid:      Bool = Bool()
 }
 
-class LaneReq(param: LaneParameters) extends Bundle {
-  val instIndex:    UInt = UInt(param.instIndexSize.W)
+class LaneRequest(param: LaneParameter) extends Bundle {
+  val instructionIndex: UInt = UInt(param.instructionIndexSize.W)
+  // decode
   val decodeResult: UInt = UInt(25.W)
+  val loadStore:    Bool = Bool()
+  val store:        Bool = Bool()
+  val special:      Bool = Bool()
 
+  // instruction
   /** vs1 or imm */
   val vs1: UInt = UInt(5.W)
 
@@ -114,19 +121,20 @@ class LaneReq(param: LaneParameters) extends Bundle {
   /** vd or rd */
   val vd: UInt = UInt(5.W)
 
-  /** data of rs1 */
-  val readFromScalar: UInt = UInt(param.ELEN.W)
+  val loadStoreEEW: UInt = UInt(2.W)
 
   /** mask type ? */
   val mask: Bool = Bool()
 
-  val ls:  Bool = Bool()
-  val st:  Bool = Bool()
-  val sp:  Bool = Bool()
-  val seg: UInt = UInt(3.W)
-  val eew: UInt = UInt(2.W)
-  def ma:  Bool = decodeResult(21) && decodeResult(1, 0).orR
+  val segment: UInt = UInt(3.W)
 
+  /** data of rs1 */
+  val readFromScalar: UInt = UInt(param.datapathWidth.W)
+
+  // TODO: move to [[V]]
+  def ma: Bool = decodeResult(21) && decodeResult(1, 0).orR
+
+  // TODO: move to Module
   def initState: InstGroupState = {
     val res:                InstGroupState = Wire(new InstGroupState(param))
     val decodeResFormat:    InstructionDecodeResult = decodeResult.asTypeOf(new InstructionDecodeResult)
@@ -136,10 +144,10 @@ class LaneReq(param: LaneParameters) extends Bundle {
     res.sReadVD := !(decodeResFormat.firstWiden || ma)
     res.wRead1 := !decodeResFormat.firstWiden
     res.wRead2 := !decodeResFormat.firstWiden
-    res.wScheduler := !sp
+    res.wScheduler := !special
     res.sExecute := false.B
     //todo: red
-    res.wExecuteRes := sp
+    res.wExecuteRes := special
     res.sWrite := (decodeResFormat.otherUnit && decodeResFormatExt.targetRD) || decodeResFormat.Widen
     res.sCrossWrite0 := !decodeResFormat.Widen
     res.sCrossWrite1 := !decodeResFormat.Widen
@@ -148,6 +156,7 @@ class LaneReq(param: LaneParameters) extends Bundle {
     res
   }
 
+  // TODO: move to Module
   def instType: UInt = {
     val decodeResFormat: InstructionDecodeResult = decodeResult.asTypeOf(new InstructionDecodeResult)
     VecInit(
@@ -163,7 +172,7 @@ class LaneReq(param: LaneParameters) extends Bundle {
   }
 }
 
-class InstGroupState(param: LaneParameters) extends Bundle {
+class InstGroupState(param: LaneParameter) extends Bundle {
   val sRead1:     Bool = Bool()
   val sRead2:     Bool = Bool()
   val sReadVD:    Bool = Bool()
@@ -181,11 +190,11 @@ class InstGroupState(param: LaneParameters) extends Bundle {
   val sWrite:       Bool = Bool()
 }
 
-class InstControlRecord(param: LaneParameters) extends Bundle {
-  val originalInformation: LaneReq = new LaneReq(param)
+class InstControlRecord(param: LaneParameter) extends Bundle {
+  val originalInformation: LaneRequest = new LaneRequest(param)
   val state:               InstGroupState = new InstGroupState(param)
   val initState:           InstGroupState = new InstGroupState(param)
-  val counter:             UInt = UInt(param.groupSizeBits.W)
+  val counter:             UInt = UInt(param.groupNumberWidth.W)
   val schedulerComplete:   Bool = Bool()
   // 这次执行从32bit的哪个位置开始执行
   val executeIndex: UInt = UInt(2.W)
@@ -194,10 +203,10 @@ class InstControlRecord(param: LaneParameters) extends Bundle {
   val instCompleted: Bool = Bool()
 
   /** 存 mask */
-  val mask: ValidIO[UInt] = Valid(UInt(param.ELEN.W))
+  val mask: ValidIO[UInt] = Valid(UInt(param.datapathWidth.W))
 
   /** 把mask按每四个分一个组,然后看orR */
-  val maskGroupedOrR: UInt = UInt((param.ELEN / 4).W)
+  val maskGroupedOrR: UInt = UInt((param.datapathWidth / 4).W)
 
   /** 这一组写vrf的mask */
   val vrfWriteMask: UInt = UInt(4.W)
@@ -222,30 +231,30 @@ class LaneCsrInterface(vlWidth: Int) extends Bundle {
   val ignoreException: Bool = Bool()
 }
 
-class LaneDataResponse(param: LaneParameters) extends Bundle {
-  val data:      UInt = UInt(param.ELEN.W)
-  val toLSU:     Bool = Bool()
-  val instIndex: UInt = UInt(param.instIndexSize.W)
-  val last:      Bool = Bool()
+class LaneDataResponse(param: LaneParameter) extends Bundle {
+  val data: UInt = UInt(param.datapathWidth.W)
+  // TODO: move to top?
+  val toLSU:            Bool = Bool()
+  val instructionIndex: UInt = UInt(param.instructionIndexSize.W)
 }
 
-class ReadBusData(param: LaneParameters) extends Bundle {
+class ReadBusData(param: LaneParameter) extends Bundle {
   val data:      UInt = UInt(param.HLEN.W)
   val tail:      Bool = Bool()
-  val target:    UInt = UInt(param.laneIndexBits.W)
-  val instIndex: UInt = UInt(param.instIndexSize.W)
+  val target:    UInt = UInt(param.laneNumberWidth.W)
+  val instIndex: UInt = UInt(param.instructionIndexSize.W)
 }
 
-class WriteBusData(param: LaneParameters) extends Bundle {
-  val data: UInt = UInt(param.ELEN.W)
+class WriteBusData(param: LaneParameter) extends Bundle {
+  val data: UInt = UInt(param.datapathWidth.W)
   val tail: Bool = Bool()
   // 正常的跨lane写可能会有mask类型的指令
   val mask:   UInt = UInt(2.W)
-  val target: UInt = UInt(param.laneIndexBits.W)
+  val target: UInt = UInt(param.laneNumberWidth.W)
   // todo: for debug
-  val from:      UInt = UInt(param.laneIndexBits.W)
-  val instIndex: UInt = UInt(param.instIndexSize.W)
-  val counter:   UInt = UInt(param.groupSizeBits.W)
+  val from:      UInt = UInt(param.laneNumberWidth.W)
+  val instIndex: UInt = UInt(param.instructionIndexSize.W)
+  val counter:   UInt = UInt(param.groupNumberWidth.W)
 }
 
 class RingPort[T <: Data](gen: T) extends Bundle {
@@ -253,14 +262,16 @@ class RingPort[T <: Data](gen: T) extends Bundle {
   val deq: DecoupledIO[T] = Decoupled(gen)
 }
 
-class SchedulerFeedback(param: LaneParameters) extends Bundle {
-  val instIndex: UInt = UInt(param.instIndexSize.W)
-  val complete:  Bool = Bool()
+class SchedulerFeedback(param: LaneParameter) extends Bundle {
+  val instructionIndex: UInt = UInt(param.instructionIndexSize.W)
+
+  /** for instructions that might finish in other lanes, use [[complete]] to tell the target lane */
+  val complete: Bool = Bool()
 }
 
-class V0Update(param: LaneParameters) extends Bundle {
-  val data:   UInt = UInt(param.ELEN.W)
-  val offset: UInt = UInt(param.offsetBits.W)
+class V0Update(param: LaneParameter) extends Bundle {
+  val data:   UInt = UInt(param.datapathWidth.W)
+  val offset: UInt = UInt(param.vrfOffsetWidth.W)
   // mask/ld类型的有可能不会写完整的32bit
   val mask: UInt = UInt(4.W)
 }

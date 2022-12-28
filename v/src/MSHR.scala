@@ -251,7 +251,7 @@ class MSHR(param: MSHRParam) extends Module {
   vrfWritePort.bits.offset := baseByteOffset(6, 5)
   vrfWritePort.bits.data := (tlPort.d.bits.data << (baseByteOffset(1, 0) ## 0.U(3.W))).asUInt
   vrfWritePort.bits.last := last
-  vrfWritePort.bits.instIndex := requestReg.instIndex
+  vrfWritePort.bits.instructionIndex := requestReg.instIndex
   vrfWritePort.bits.mask := Mux1H(
     dataEEWOH(2, 0),
     Seq(

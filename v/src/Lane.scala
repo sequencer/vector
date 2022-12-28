@@ -4,92 +4,158 @@ import chisel3._
 import chisel3.experimental.{SerializableModule, SerializableModuleParameter}
 import chisel3.util._
 
-object LaneParameters {
-  implicit val rwP: upickle.default.ReadWriter[LaneParameters] = upickle.default.macroRW
+object LaneParameter {
+  implicit def rwP: upickle.default.ReadWriter[LaneParameter] = upickle.default.macroRW
 }
-case class LaneParameters(ELEN: Int = 32, VLEN: Int = 1024, lane: Int = 8, chainingSize: Int = 4)
+case class LaneParameter(vLen: Int, datapathWidth: Int, laneNumber: Int, chainingSize: Int, vrfWriteQueueSize: Int)
     extends SerializableModuleParameter {
-  val instIndexSize: Int = log2Ceil(chainingSize) + 1
-  val VLMax:         Int = VLEN
-  val VLMaxWidth:    Int = log2Ceil(VLMax) + 1
-  // vlmul = 8时会有多少组,其中每一组长度是 ELEN
-  val groupSize:      Int = VLEN * 8 / lane / ELEN
-  val controlNum:     Int = 4
-  val HLEN:           Int = ELEN / 2
-  val executeUnitNum: Int = 6
-  val laneIndexBits:  Int = log2Ceil(lane)
-  val writeQueueSize: Int = 8
-  val elenBits:       Int = log2Ceil(ELEN)
-  val groupSizeBits:  Int = log2Ceil(groupSize) + 1
-  // 每一组会会包含32bit,在 vSew < 2时,需要有一个控制寄存器来管理,寄存器的长度
-  val groupControlSize: Int = ELEN / 8
-  // 单个寄存器在每个lane里能分成多少组, 每次只访问32bit
-  val singleGroupSize: Int = VLEN / ELEN / lane
-  val offsetBits:      Int = log2Ceil(singleGroupSize)
+  val instructionIndexSize: Int = log2Ceil(chainingSize) + 1
+  val lmulMax:              Int = 8
+  val sewMin:               Int = 8
+  val vlMax:                Int = vLen * lmulMax / sewMin
 
-  // mask 分组
-  val maskGroupWidth:    Int = ELEN
-  val maskGroupSize:     Int = VLEN / ELEN
-  val maskGroupSizeBits: Int = log2Ceil(maskGroupSize)
+  /** width of vl
+    * `+1` is for lv being 0 to vlMax(not vlMax - 1).
+    * we use less than for comparing, rather than less equal.
+    */
+  val vlWidth: Int = log2Ceil(vlMax) + 1
 
-  def vrfParam:         VRFParam = VRFParam(VLEN, lane, ELEN)
-  def datePathParam:    DataPathParam = DataPathParam(ELEN)
-  def shifterParameter: LaneShifterParameter = LaneShifterParameter(ELEN, elenBits)
-  def mulParam:         LaneMulParam = LaneMulParam(ELEN)
-  def indexParam:       LaneIndexCalculatorParameter = LaneIndexCalculatorParameter(groupSizeBits, laneIndexBits)
+  /** how many group does a single register have.
+    *
+    * in each lane, for one vector register, it is divided into groups with size of [[datapathWidth]]
+    */
+  val singleGroupSize: Int = vLen / datapathWidth / laneNumber
+
+  /** for each instruction, the maximum number of groups to execute. */
+  val groupNumberMax: Int = singleGroupSize * lmulMax
+
+  /** used as the LSB index of VRF access
+    *
+    * TODO: uarch doc the arrangement of VRF: {reg index, offset}
+    *
+    * for each number in table below, it represent a [[datapathWidth]]
+    * lane0 | lane1 | ...                                   | lane8
+    * offset0    0  |    1  |    2  |    3  |    4  |    5  |    6  |    7
+    * offset1    8  |    9  |   10  |   11  |   12  |   13  |   14  |   15
+    * offset2   16  |   17  |   18  |   19  |   20  |   21  |   22  |   23
+    * offset3   24  |   25  |   26  |   27  |   28  |   29  |   30  |   31
+    */
+  val vrfOffsetWidth: Int = log2Ceil(singleGroupSize)
+
+  /** compare to next group number. */
+  val groupNumberWidth: Int = log2Ceil(groupNumberMax) + 1
+  // TODO: remove
+  val HLEN: Int = datapathWidth / 2
+
+  /** uarch TODO: instantiate logic, add to each slot
+    * shift, multiple, divide, other
+    *
+    * TODO: use Seq().size to calculate
+    */
+  val executeUnitNum:     Int = 6
+  val laneNumberWidth:    Int = log2Ceil(laneNumber)
+  val datapathWidthWidth: Int = log2Ceil(datapathWidth)
+
+  /** see [[VParameter.maskGroupWidth]] */
+  val maskGroupWidth: Int = datapathWidth
+
+  /** see [[VParameter.maskGroupSize]] */
+  val maskGroupSize:      Int = vLen / datapathWidth
+  val maskGroupSizeWidth: Int = log2Ceil(maskGroupSize)
+
+  def vrfParam:         VRFParam = VRFParam(vLen, laneNumber, datapathWidth)
+  def datePathParam:    DataPathParam = DataPathParam(datapathWidth)
+  def shifterParameter: LaneShifterParameter = LaneShifterParameter(datapathWidth, datapathWidthWidth)
+  def mulParam:         LaneMulParam = LaneMulParam(datapathWidth)
+  def indexParam:       LaneIndexCalculatorParameter = LaneIndexCalculatorParameter(groupNumberWidth, laneNumberWidth)
 }
 
-/**
-  * ring & inst control & vrf & vfu
-  */
-class Lane(val parameter: LaneParameters) extends Module with SerializableModule[LaneParameters] {
-  val laneReq:         DecoupledIO[LaneReq] = IO(Flipped(Decoupled(new LaneReq(parameter))))
-  val csrInterface:    LaneCsrInterface = IO(Input(new LaneCsrInterface(parameter.VLMaxWidth)))
-  val dataToScheduler: ValidIO[LaneDataResponse] = IO(Valid(new LaneDataResponse(parameter)))
-  val laneIndex:       UInt = IO(Input(UInt(parameter.laneIndexBits.W)))
-  val readBusPort:     RingPort[ReadBusData] = IO(new RingPort(new ReadBusData(parameter)))
-  val writeBusPort:    RingPort[WriteBusData] = IO(new RingPort(new WriteBusData(parameter)))
-  val feedback:        ValidIO[SchedulerFeedback] = IO(Flipped(Valid(new SchedulerFeedback(parameter))))
-  val readDataPort:    DecoupledIO[VRFReadRequest] = IO(Flipped(Decoupled(new VRFReadRequest(parameter.vrfParam))))
-  val readResult:      UInt = IO(Output(UInt(parameter.ELEN.W)))
-  val vrfWritePort:    DecoupledIO[VRFWriteRequest] = IO(Flipped(Decoupled(new VRFWriteRequest(parameter.vrfParam))))
+class Lane(val parameter: LaneParameter) extends Module with SerializableModule[LaneParameter] {
 
-  /** 本来结束的通知放在[[dataToScheduler]],但是存在有多指令同时结束的情况,所以单独给出来 */
-  val endNotice:     UInt = IO(Output(UInt(parameter.controlNum.W)))
-  val v0Update:      ValidIO[V0Update] = IO(Valid(new V0Update(parameter)))
-  val maskRegInput:  UInt = IO(Input(UInt(parameter.maskGroupWidth.W)))
-  val maskSelect:    UInt = IO(Output(UInt(parameter.maskGroupSizeBits.W)))
-  val lsuLastReport: ValidIO[UInt] = IO(Flipped(Valid(UInt(parameter.instIndexSize.W))))
-  val bufferClear:   Bool = IO(Input(Bool()))
+  /** laneIndex is a IO constant for D/I and physical implementations. */
+  val laneIndex: UInt = IO(Input(UInt(parameter.laneNumberWidth.W)))
+  dontTouch(laneIndex)
+
+  /** VRF Read Interface.
+    * TODO: use mesh
+    */
+  val readBusPort: RingPort[ReadBusData] = IO(new RingPort(new ReadBusData(parameter)))
+
+  /** VRF Write Interface.
+    * TODO: use mesh
+    */
+  val writeBusPort: RingPort[WriteBusData] = IO(new RingPort(new WriteBusData(parameter)))
+
+  /** request from [[V]] to [[Lane]] */
+  val laneRequest: DecoupledIO[LaneRequest] = IO(Flipped(Decoupled(new LaneRequest(parameter))))
+
+  /** CSR Interface. */
+  val csrInterface: LaneCsrInterface = IO(Input(new LaneCsrInterface(parameter.vlWidth)))
+
+  /** to mask unit or LSU */
+  val laneResponse: ValidIO[LaneDataResponse] = IO(Valid(new LaneDataResponse(parameter)))
+
+  /** feedback from [[V]] for [[laneResponse]] */
+  val laneResponseFeedback: ValidIO[SchedulerFeedback] = IO(Flipped(Valid(new SchedulerFeedback(parameter))))
+
+  // for LSU and V accessing lane, this is not a part of ring, but a direct connection.
+  // TODO: learn AXI channel, reuse [[vrfReadAddressChannel]] and [[vrfWriteChannel]].
+  val vrfReadAddressChannel: DecoupledIO[VRFReadRequest] = IO(
+    Flipped(Decoupled(new VRFReadRequest(parameter.vrfParam)))
+  )
+  val vrfReadDataChannel: UInt = IO(Output(UInt(parameter.datapathWidth.W)))
+  val vrfWriteChannel:    DecoupledIO[VRFWriteRequest] = IO(Flipped(Decoupled(new VRFWriteRequest(parameter.vrfParam))))
+
+  /** for each instruction in the slot, response to top when instruction is finished in this lane. */
+  val instructionFinished: UInt = IO(Output(UInt(parameter.chainingSize.W)))
+
+  /** V0 update in the lane should also update [[V.v0]] */
+  val v0Update: ValidIO[V0Update] = IO(Valid(new V0Update(parameter)))
+
+  /** input of mask data */
+  val maskInput: UInt = IO(Input(UInt(parameter.maskGroupWidth.W)))
+
+  /** select which mask group. */
+  val maskSelect: UInt = IO(Output(UInt(parameter.maskGroupSizeWidth.W)))
+
+  /** because of load store index EEW, is complicated for lane to calculate whether LSU is finished.
+    * let LSU directly tell each lane it is finished.
+    */
+  val lsuLastReport: ValidIO[UInt] = IO(Flipped(Valid(UInt(parameter.instructionIndexSize.W))))
+
+  /** for RaW, VRF should wait for buffer to be empty. */
+  val lsuVRFWriteBufferClear: Bool = IO(Input(Bool()))
 
   dontTouch(writeBusPort)
-  val maskGroupedOrR: UInt = VecInit(maskRegInput.asBools.grouped(4).toSeq.map(VecInit(_).asUInt.orR)).asUInt
+  val maskGroupedOrR: UInt = VecInit(maskInput.asBools.grouped(4).toSeq.map(VecInit(_).asUInt.orR)).asUInt
   val vrf:            VRF = Module(new VRF(parameter.vrfParam))
   // reg
-  val controlValid: Vec[Bool] = RegInit(VecInit(Seq.fill(parameter.controlNum)(false.B)))
+  val controlValid: Vec[Bool] = RegInit(VecInit(Seq.fill(parameter.chainingSize)(false.B)))
   // read from vs1
-  val source1: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.controlNum)(0.U(parameter.ELEN.W))))
+  val source1: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.chainingSize)(0.U(parameter.datapathWidth.W))))
   // read from vs2
-  val source2: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.controlNum)(0.U(parameter.ELEN.W))))
+  val source2: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.chainingSize)(0.U(parameter.datapathWidth.W))))
   // read from vd
-  val source3: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.controlNum)(0.U(parameter.ELEN.W))))
+  val source3: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.chainingSize)(0.U(parameter.datapathWidth.W))))
   // execute result
-  val result: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.controlNum)(0.U(parameter.ELEN.W))))
+  val result: Vec[UInt] = RegInit(VecInit(Seq.fill(parameter.chainingSize)(0.U(parameter.datapathWidth.W))))
   // 跨lane写的额外用寄存器存储执行的结果和mask
-  val crossWriteResultHead: UInt = RegInit(0.U(parameter.ELEN.W))
+  val crossWriteResultHead: UInt = RegInit(0.U(parameter.datapathWidth.W))
   val crossWriteMaskHead:   UInt = RegInit(0.U(2.W))
-  val crossWriteResultTail: UInt = RegInit(0.U(parameter.ELEN.W))
+  val crossWriteResultTail: UInt = RegInit(0.U(parameter.datapathWidth.W))
   val crossWriteMaskTail:   UInt = RegInit(0.U(2.W))
   // 额外给 lsu 和 mask unit
   val rfWriteVec: Vec[ValidIO[VRFWriteRequest]] = Wire(
-    Vec(parameter.controlNum + 1, Valid(new VRFWriteRequest(parameter.vrfParam)))
+    Vec(parameter.chainingSize + 1, Valid(new VRFWriteRequest(parameter.vrfParam)))
   )
-  rfWriteVec(4).valid := vrfWritePort.valid
-  rfWriteVec(4).bits := vrfWritePort.bits
-  val rfWriteFire: UInt = Wire(UInt((parameter.controlNum + 2).W))
-  vrfWritePort.ready := rfWriteFire(4)
-  val maskRequestVec:  Vec[ValidIO[UInt]] = Wire(Vec(parameter.controlNum, Valid(UInt(parameter.maskGroupSizeBits.W))))
-  val maskRequestFire: UInt = Wire(UInt(parameter.controlNum.W))
+  rfWriteVec(4).valid := vrfWriteChannel.valid
+  rfWriteVec(4).bits := vrfWriteChannel.bits
+  val rfWriteFire: UInt = Wire(UInt((parameter.chainingSize + 2).W))
+  vrfWriteChannel.ready := rfWriteFire(4)
+  val maskRequestVec: Vec[ValidIO[UInt]] = Wire(
+    Vec(parameter.chainingSize, Valid(UInt(parameter.maskGroupSizeWidth.W)))
+  )
+  val maskRequestFire: UInt = Wire(UInt(parameter.chainingSize.W))
   // 跨lane操作的寄存器
   // 从rf里面读出来的， 下一个周期试图上环
   val crossReadHeadTX: UInt = RegInit(0.U(parameter.HLEN.W))
@@ -98,40 +164,40 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
   val crossReadHeadRX: UInt = RegInit(0.U(parameter.HLEN.W))
   val crossReadTailRX: UInt = RegInit(0.U(parameter.HLEN.W))
   val control: Vec[InstControlRecord] = RegInit(
-    VecInit(Seq.fill(parameter.controlNum)(0.U.asTypeOf(new InstControlRecord(parameter))))
+    VecInit(Seq.fill(parameter.chainingSize)(0.U.asTypeOf(new InstControlRecord(parameter))))
   )
 
   // wire
   val vrfReadWire: Vec[Vec[DecoupledIO[VRFReadRequest]]] = Wire(
-    Vec(parameter.controlNum, Vec(3, Decoupled(new VRFReadRequest(parameter.vrfParam))))
+    Vec(parameter.chainingSize, Vec(3, Decoupled(new VRFReadRequest(parameter.vrfParam))))
   )
-  val vrfReadResult:   Vec[Vec[UInt]] = Wire(Vec(parameter.controlNum, Vec(3, UInt(parameter.ELEN.W))))
-  val controlActive:   Vec[Bool] = Wire(Vec(parameter.controlNum, Bool()))
-  val controlCanShift: Vec[Bool] = Wire(Vec(parameter.controlNum, Bool()))
+  val vrfReadResult:   Vec[Vec[UInt]] = Wire(Vec(parameter.chainingSize, Vec(3, UInt(parameter.datapathWidth.W))))
+  val controlActive:   Vec[Bool] = Wire(Vec(parameter.chainingSize, Bool()))
+  val controlCanShift: Vec[Bool] = Wire(Vec(parameter.chainingSize, Bool()))
   // 读的环index与这个lane匹配上了, 会出环
-  val readBusDeq: ValidIO[ReadBusData] = Wire(Valid(new ReadBusData(parameter: LaneParameters)))
+  val readBusDeq: ValidIO[ReadBusData] = Wire(Valid(new ReadBusData(parameter: LaneParameter)))
 
   // 以6个执行单元为视角的控制信号
-  val executeEnqValid:  Vec[UInt] = Wire(Vec(parameter.controlNum, UInt(parameter.executeUnitNum.W)))
+  val executeEnqValid:  Vec[UInt] = Wire(Vec(parameter.chainingSize, UInt(parameter.executeUnitNum.W)))
   val executeEnqFire:   UInt = Wire(UInt(parameter.executeUnitNum.W))
   val executeDeqFire:   UInt = Wire(UInt(parameter.executeUnitNum.W))
-  val executeDeqData:   Vec[UInt] = Wire(Vec(parameter.executeUnitNum, UInt(parameter.ELEN.W)))
-  val instTypeVec:      Vec[UInt] = Wire(Vec(parameter.controlNum, UInt(parameter.executeUnitNum.W)))
-  val instWillComplete: Vec[Bool] = Wire(Vec(parameter.controlNum, Bool()))
-  val maskReqValid:     Vec[Bool] = Wire(Vec(parameter.controlNum, Bool()))
+  val executeDeqData:   Vec[UInt] = Wire(Vec(parameter.executeUnitNum, UInt(parameter.datapathWidth.W)))
+  val instTypeVec:      Vec[UInt] = Wire(Vec(parameter.chainingSize, UInt(parameter.executeUnitNum.W)))
+  val instWillComplete: Vec[Bool] = Wire(Vec(parameter.chainingSize, Bool()))
+  val maskReqValid:     Vec[Bool] = Wire(Vec(parameter.chainingSize, Bool()))
   // 往执行单元的请求
   val logicRequests: Vec[LaneLogicRequest] = Wire(
-    Vec(parameter.controlNum, new LaneLogicRequest(parameter.datePathParam))
+    Vec(parameter.chainingSize, new LaneLogicRequest(parameter.datePathParam))
   )
-  val adderRequests: Vec[LaneAdderReq] = Wire(Vec(parameter.controlNum, new LaneAdderReq(parameter.datePathParam)))
+  val adderRequests: Vec[LaneAdderReq] = Wire(Vec(parameter.chainingSize, new LaneAdderReq(parameter.datePathParam)))
   val shiftRequests: Vec[LaneShifterReq] = Wire(
-    Vec(parameter.controlNum, new LaneShifterReq(parameter.shifterParameter))
+    Vec(parameter.chainingSize, new LaneShifterReq(parameter.shifterParameter))
   )
-  val mulRequests:   Vec[LaneMulReq] = Wire(Vec(parameter.controlNum, new LaneMulReq(parameter.mulParam)))
-  val divRequests:   Vec[LaneDivRequest] = Wire(Vec(parameter.controlNum, new LaneDivRequest(parameter.datePathParam)))
-  val otherRequests: Vec[OtherUnitReq] = Wire(Vec(parameter.controlNum, Output(new OtherUnitReq(parameter))))
-  val maskRequests:  Vec[LaneDataResponse] = Wire(Vec(parameter.controlNum, Output(new LaneDataResponse(parameter))))
-  val endNoticeVec:  Vec[UInt] = Wire(Vec(parameter.controlNum, UInt(parameter.controlNum.W)))
+  val mulRequests:   Vec[LaneMulReq] = Wire(Vec(parameter.chainingSize, new LaneMulReq(parameter.mulParam)))
+  val divRequests:   Vec[LaneDivRequest] = Wire(Vec(parameter.chainingSize, new LaneDivRequest(parameter.datePathParam)))
+  val otherRequests: Vec[OtherUnitReq] = Wire(Vec(parameter.chainingSize, Output(new OtherUnitReq(parameter))))
+  val maskRequests:  Vec[LaneDataResponse] = Wire(Vec(parameter.chainingSize, Output(new LaneDataResponse(parameter))))
+  val endNoticeVec:  Vec[UInt] = Wire(Vec(parameter.chainingSize, UInt(parameter.chainingSize.W)))
 
   // 作为最老的坑的控制信号
   val sendReady:      Bool = Wire(Bool())
@@ -154,7 +220,7 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
 
   // 跨lane写rf需要一个queue
   val crossWriteQueue: Queue[VRFWriteRequest] = Module(
-    new Queue(new VRFWriteRequest(parameter.vrfParam), parameter.writeQueueSize)
+    new Queue(new VRFWriteRequest(parameter.vrfParam), parameter.vrfWriteQueueSize)
   )
 
   control.zipWithIndex.foreach {
@@ -182,42 +248,42 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       controlCanShift(index) := !record.state.sExecute
       // vs1 read
       vrfReadWire(index)(0).valid := !record.state.sRead1 && controlActive(index)
-      vrfReadWire(index)(0).bits.offset := record.counter(parameter.offsetBits - 1, 0)
+      vrfReadWire(index)(0).bits.offset := record.counter(parameter.vrfOffsetWidth - 1, 0)
       // todo: 在 vlmul > 0 的时候需要做的是cat而不是+,因为寄存器是对齐的
       vrfReadWire(index)(0).bits.vs := record.originalInformation.vs1 + record.counter(
-        parameter.groupSizeBits - 1,
-        parameter.offsetBits
+        parameter.groupNumberWidth - 1,
+        parameter.vrfOffsetWidth
       )
-      vrfReadWire(index)(0).bits.instIndex := record.originalInformation.instIndex
+      vrfReadWire(index)(0).bits.instIndex := record.originalInformation.instructionIndex
       // Mux(decodeResFormat.eew16, 1.U, csrInterface.vSew)
 
       // vs2 read
       vrfReadWire(index)(1).valid := !record.state.sRead2 && controlActive(index)
       vrfReadWire(index)(1).bits.offset := Mux(
         needCrossRead,
-        record.counter(parameter.offsetBits - 2, 0) ## false.B,
-        record.counter(parameter.offsetBits - 1, 0)
+        record.counter(parameter.vrfOffsetWidth - 2, 0) ## false.B,
+        record.counter(parameter.vrfOffsetWidth - 1, 0)
       )
       vrfReadWire(index)(1).bits.vs := record.originalInformation.vs2 + Mux(
         needCrossRead,
-        record.counter(parameter.groupSizeBits - 1, parameter.offsetBits - 1) ## false.B,
-        record.counter(parameter.groupSizeBits - 1, parameter.offsetBits)
+        record.counter(parameter.groupNumberWidth - 1, parameter.vrfOffsetWidth - 1) ## false.B,
+        record.counter(parameter.groupNumberWidth - 1, parameter.vrfOffsetWidth)
       )
-      vrfReadWire(index)(1).bits.instIndex := record.originalInformation.instIndex
+      vrfReadWire(index)(1).bits.instIndex := record.originalInformation.instructionIndex
 
       // vd read
       vrfReadWire(index)(2).valid := !record.state.sReadVD && controlActive(index)
       vrfReadWire(index)(2).bits.offset := Mux(
         needCrossRead,
-        record.counter(parameter.offsetBits - 2, 0) ## true.B,
-        record.counter(parameter.offsetBits - 1, 0)
+        record.counter(parameter.vrfOffsetWidth - 2, 0) ## true.B,
+        record.counter(parameter.vrfOffsetWidth - 1, 0)
       )
       vrfReadWire(index)(2).bits.vs := record.originalInformation.vd + Mux(
         needCrossRead,
-        record.counter(parameter.groupSizeBits - 1, parameter.offsetBits - 1) ## true.B,
-        record.counter(parameter.groupSizeBits - 1, parameter.offsetBits)
+        record.counter(parameter.groupNumberWidth - 1, parameter.vrfOffsetWidth - 1) ## true.B,
+        record.counter(parameter.groupNumberWidth - 1, parameter.vrfOffsetWidth)
       )
-      vrfReadWire(index)(2).bits.instIndex := record.originalInformation.instIndex
+      vrfReadWire(index)(2).bits.instIndex := record.originalInformation.instructionIndex
 
       val readFinish =
         record.state.sReadVD && record.state.sRead1 && record.state.sRead2 && record.state.wRead1 && record.state.wRead2
@@ -241,19 +307,19 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       if (index == 0) {
         val tryToSendHead = record.state.sRead2 && !record.state.sSendResult0 && controlValid.head
         val tryToSendTail = record.state.sReadVD && !record.state.sSendResult1 && controlValid.head
-        sendReadData.bits.target := tryToSendTail ## laneIndex(parameter.laneIndexBits - 1, 1)
+        sendReadData.bits.target := tryToSendTail ## laneIndex(parameter.laneNumberWidth - 1, 1)
         sendReadData.bits.tail := laneIndex(0)
-        sendReadData.bits.instIndex := record.originalInformation.instIndex
+        sendReadData.bits.instIndex := record.originalInformation.instructionIndex
         sendReadData.bits.data := Mux(tryToSendHead, crossReadHeadTX(0), crossReadTailTX(0))
         sendReadData.valid := tryToSendHead || tryToSendTail
 
         // 跨lane的写
         val sendWriteHead = record.state.sExecute && !record.state.sCrossWrite0 && controlValid.head
         val sendWriteTail = record.state.sExecute && !record.state.sCrossWrite1 && controlValid.head
-        sendWriteData.bits.target := laneIndex(parameter.laneIndexBits - 2, 0) ## (!sendWriteHead)
+        sendWriteData.bits.target := laneIndex(parameter.laneNumberWidth - 2, 0) ## (!sendWriteHead)
         sendWriteData.bits.from := laneIndex
-        sendWriteData.bits.tail := laneIndex(parameter.laneIndexBits - 1)
-        sendWriteData.bits.instIndex := record.originalInformation.instIndex
+        sendWriteData.bits.tail := laneIndex(parameter.laneNumberWidth - 1)
+        sendWriteData.bits.instIndex := record.originalInformation.instructionIndex
         sendWriteData.bits.counter := record.counter
         sendWriteData.bits.data := Mux(sendWriteHead, crossWriteResultHead, crossWriteResultTail)
         sendWriteData.bits.mask := Mux(sendWriteHead, crossWriteMaskHead, crossWriteMaskTail)
@@ -261,7 +327,7 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
 
         // 跨lane读写的数据接收
         when(readBusDeq.valid) {
-          assert(readBusDeq.bits.instIndex === record.originalInformation.instIndex)
+          assert(readBusDeq.bits.instIndex === record.originalInformation.instructionIndex)
           when(readBusDeq.bits.tail) {
             record.state.wRead2 := true.B
             crossReadTailRX := readBusDeq.bits.data
@@ -316,11 +382,11 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
             crossWriteResultTail :=
               Mux(
                 csrInterface.vSew(0),
-                dataDeq(parameter.ELEN - 1, parameter.HLEN),
+                dataDeq(parameter.datapathWidth - 1, parameter.HLEN),
                 Mux(
                   record.executeIndex(0),
                   dataDeq(parameter.HLEN - 1, 0),
-                  crossWriteResultTail(parameter.ELEN - 1, parameter.HLEN)
+                  crossWriteResultTail(parameter.datapathWidth - 1, parameter.HLEN)
                 )
               ) ## Mux(
                 !record.executeIndex(0) || csrInterface.vSew(0),
@@ -335,11 +401,11 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
             crossWriteResultHead :=
               Mux(
                 csrInterface.vSew(0),
-                dataDeq(parameter.ELEN - 1, parameter.HLEN),
+                dataDeq(parameter.datapathWidth - 1, parameter.HLEN),
                 Mux(
                   record.executeIndex(0),
                   dataDeq(parameter.HLEN - 1, 0),
-                  crossWriteResultHead(parameter.ELEN - 1, parameter.HLEN)
+                  crossWriteResultHead(parameter.datapathWidth - 1, parameter.HLEN)
                 )
               ) ## Mux(
                 !record.executeIndex(0) || csrInterface.vSew(0),
@@ -383,9 +449,10 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       // 选出下一个element的index
       val maskCorrection: UInt = Mux1H(
         Seq(record.originalInformation.mask && record.mask.valid, !record.originalInformation.mask),
-        Seq(record.mask.bits, (-1.S(parameter.ELEN.W)).asUInt)
+        Seq(record.mask.bits, (-1.S(parameter.datapathWidth.W)).asUInt)
       )
-      val next1H = ffo((scanLeftOr(UIntToOH(elementIndex(4, 0))) ## false.B) & maskCorrection)(parameter.ELEN - 1, 0)
+      val next1H =
+        ffo((scanLeftOr(UIntToOH(elementIndex(4, 0))) ## false.B) & maskCorrection)(parameter.datapathWidth - 1, 0)
       val nextOrR: Bool = next1H.orR
       // nextIndex.getWidth = 5
       val nextIndex: UInt = OHToUInt(next1H)
@@ -395,14 +462,14 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       val nextGroupCountMSB: UInt = Mux1H(
         sew1H(1, 0),
         Seq(
-          record.counter(parameter.groupSizeBits - 1, parameter.groupSizeBits - 3),
-          false.B ## record.counter(parameter.groupSizeBits - 1, parameter.groupSizeBits - 2)
+          record.counter(parameter.groupNumberWidth - 1, parameter.groupNumberWidth - 3),
+          false.B ## record.counter(parameter.groupNumberWidth - 1, parameter.groupNumberWidth - 2)
         )
       ) + maskNeedUpdate
       val indexInLane = nextGroupCountMSB ## nextIndex
       // csrInterface.vSew 只会取值0, 1, 2,需要特别处理移位
       val nextIntermediateVolume = (indexInLane << csrInterface.vSew).asUInt
-      val nextGroupCount = nextIntermediateVolume(parameter.groupSizeBits + 1, 2)
+      val nextGroupCount = nextIntermediateVolume(parameter.groupNumberWidth + 1, 2)
       val nextExecuteIndex = nextIntermediateVolume(1, 0)
 
       /** 虽然没有计算完一组,但是这一组剩余的都被mask去掉了 */
@@ -546,17 +613,19 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       val maskRequest: LaneDataResponse = Wire(Output(new LaneDataResponse(parameter)))
 
       // viota & compress & ls 需要给外边数据
-      val maskType: Bool = (record.originalInformation.sp || record.originalInformation.ls) && controlActive(index)
+      val maskType: Bool =
+        (record.originalInformation.special || record.originalInformation.loadStore) && controlActive(index)
       val maskValid = maskType && record.state.sRead2 && !record.state.sExecute
       // 往外边发的是原始的数据
       maskRequest.data := source2(index)
-      maskRequest.toLSU := record.originalInformation.ls
-      maskRequest.instIndex := record.originalInformation.instIndex
-      maskRequest.last := instWillComplete(index)
+      maskRequest.toLSU := record.originalInformation.loadStore
+      maskRequest.instructionIndex := record.originalInformation.instructionIndex
       maskRequests(index) := maskAnd(controlValid(index) && maskValid, maskRequest)
       maskReqValid(index) := maskValid
 
-      when(feedback.valid && feedback.bits.instIndex === record.originalInformation.instIndex) {
+      when(
+        laneResponseFeedback.valid && laneResponseFeedback.bits.instructionIndex === record.originalInformation.instructionIndex
+      ) {
         record.state.wScheduler := true.B
       }
       instTypeVec(index) := record.originalInformation.instType
@@ -570,7 +639,7 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       }
 
       // todo: 暂时先这样把,处理mask的时候需要修
-      val executeResult = (dataDeq << dataOffset).asUInt(parameter.ELEN - 1, 0)
+      val executeResult = (dataDeq << dataOffset).asUInt(parameter.datapathWidth - 1, 0)
       val resultUpdate: UInt = (executeResult & executeBitEnable) | (result(index) & (~executeBitEnable).asUInt)
       when(dataDeqFire) {
         when(groupEnd) {
@@ -584,13 +653,13 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       // 写rf
       rfWriteVec(index).valid := record.state.wExecuteRes && !record.state.sWrite && controlActive(index)
       rfWriteVec(index).bits.vd := record.originalInformation.vd + record.counter(
-        parameter.groupSizeBits - 1,
-        parameter.offsetBits
+        parameter.groupNumberWidth - 1,
+        parameter.vrfOffsetWidth
       )
       rfWriteVec(index).bits.offset := record.counter
       rfWriteVec(index).bits.data := result(index)
       rfWriteVec(index).bits.last := instWillComplete(index)
-      rfWriteVec(index).bits.instIndex := record.originalInformation.instIndex
+      rfWriteVec(index).bits.instructionIndex := record.originalInformation.instructionIndex
       val notLastWrite = !instWillComplete(index)
       // 判断这一个lane是否在body与tail的分界线上,只有分界线上的才需要特别计算mask
       val dividingLine:    Bool = (csrInterface.vl << csrInterface.vSew).asUInt(4, 2) === laneIndex
@@ -599,13 +668,15 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       when(rfWriteFire(index)) {
         record.state.sWrite := true.B
       }
-      endNoticeVec(index) := 0.U(parameter.controlNum.W)
+      endNoticeVec(index) := 0.U(parameter.chainingSize.W)
       val maskUnhindered = maskRequestFire(index) || !maskNeedUpdate
       when((record.state.asUInt.andR && maskUnhindered) || record.instCompleted) {
         when(instWillComplete(index) || record.instCompleted) {
           controlValid(index) := false.B
           when(controlValid(index)) {
-            endNoticeVec(index) := UIntToOH(record.originalInformation.instIndex(parameter.instIndexSize - 2, 0))
+            endNoticeVec(index) := UIntToOH(
+              record.originalInformation.instructionIndex(parameter.instructionIndexSize - 2, 0)
+            )
           }
         }.otherwise {
           record.state := record.initState
@@ -614,15 +685,17 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
           record.vrfWriteMask := 0.U
           when(maskRequestFire(index)) {
             record.mask.valid := true.B
-            record.mask.bits := maskRegInput
+            record.mask.bits := maskInput
             record.maskGroupedOrR := maskGroupedOrR
           }
         }
       }
-      when(feedback.bits.complete && feedback.bits.instIndex === record.originalInformation.instIndex) {
+      when(
+        laneResponseFeedback.bits.complete && laneResponseFeedback.bits.instructionIndex === record.originalInformation.instructionIndex
+      ) {
         // 例如:别的lane找到了第一个1
         record.schedulerComplete := true.B
-        when(record.originalInformation.sp) {
+        when(record.originalInformation.special) {
           controlValid(index) := false.B
         }
       }
@@ -665,7 +738,7 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
     crossWriteQueue.io.enq.bits.offset := writeBusPort.enq.bits.counter ## writeBusPort.enq.bits.tail
     crossWriteQueue.io.enq.bits.data := writeBusPort.enq.bits.data
     crossWriteQueue.io.enq.bits.last := instWillComplete.head && writeBusPort.enq.bits.tail
-    crossWriteQueue.io.enq.bits.instIndex := control.head.originalInformation.instIndex
+    crossWriteQueue.io.enq.bits.instructionIndex := control.head.originalInformation.instructionIndex
     crossWriteQueue.io.enq.bits.mask := FillInterleaved(2, writeBusPort.enq.bits.mask)
     //writeBusPort.enq.bits
     crossWriteQueue.io.enq.valid := false.B
@@ -707,10 +780,10 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       .reduce(_ | _)
       .asTypeOf(new LaneDivRequest(parameter.datePathParam))
     otherUnit.req := VecInit(otherRequests.map(_.asUInt)).reduce(_ | _).asTypeOf(Output(new OtherUnitReq(parameter)))
-    dataToScheduler.bits := VecInit(maskRequests.map(_.asUInt))
+    laneResponse.bits := VecInit(maskRequests.map(_.asUInt))
       .reduce(_ | _)
       .asTypeOf(Output(new LaneDataResponse(parameter)))
-    dataToScheduler.valid := maskReqValid.asUInt.orR
+    laneResponse.valid := maskReqValid.asUInt.orR
     // 执行单元的其他连接
     adder.csr.vSew := csrInterface.vSew
     adder.csr.vxrm := csrInterface.vxrm
@@ -735,10 +808,12 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
     // 连接读口
     val readArbiter = Module(new Arbiter(new VRFReadRequest(parameter.vrfParam), 8))
     // 暂时把lsu的读放在了最低优先级,有问题再改
-    (vrfReadWire(1).last +: (vrfReadWire(2) ++ vrfReadWire(3)) :+ readDataPort).zip(readArbiter.io.in).foreach {
-      case (source, sink) =>
-        sink <> source
-    }
+    (vrfReadWire(1).last +: (vrfReadWire(2) ++ vrfReadWire(3)) :+ vrfReadAddressChannel)
+      .zip(readArbiter.io.in)
+      .foreach {
+        case (source, sink) =>
+          sink <> source
+      }
     (vrfReadWire.head ++ vrfReadWire(1).init :+ readArbiter.io.out).zip(vrf.read).foreach {
       case (source, sink) =>
         sink <> source
@@ -750,7 +825,7 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       case (sink, source) =>
         sink := source
     }
-    readResult := vrf.readResult.last
+    vrfReadDataChannel := vrf.readResult.last
 
     // 写 rf
     val normalWrite = VecInit(rfWriteVec.map(_.valid)).asUInt.orR
@@ -770,21 +845,23 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
 
   {
     // 处理mask的请求
-    val maskSelectArbitrator = ffo(VecInit(maskRequestVec.map(_.valid)).asUInt ## (laneReq.valid && laneReq.bits.mask))
-    maskRequestFire := maskSelectArbitrator(parameter.controlNum, 1)
+    val maskSelectArbitrator = ffo(
+      VecInit(maskRequestVec.map(_.valid)).asUInt ## (laneRequest.valid && laneRequest.bits.mask)
+    )
+    maskRequestFire := maskSelectArbitrator(parameter.chainingSize, 1)
     maskSelect := Mux1H(maskSelectArbitrator, 0.U.asTypeOf(maskRequestVec.head.bits) +: maskRequestVec.map(_.bits))
   }
   // 控制逻辑的移动
   val entranceControl: InstControlRecord = Wire(new InstControlRecord(parameter))
-  val entranceFormat:  InstructionDecodeResult = laneReq.bits.decodeResult.asTypeOf(new InstructionDecodeResult)
-  entranceControl.originalInformation := laneReq.bits
-  entranceControl.state := laneReq.bits.initState
-  entranceControl.initState := laneReq.bits.initState
+  val entranceFormat:  InstructionDecodeResult = laneRequest.bits.decodeResult.asTypeOf(new InstructionDecodeResult)
+  entranceControl.originalInformation := laneRequest.bits
+  entranceControl.state := laneRequest.bits.initState
+  entranceControl.initState := laneRequest.bits.initState
   entranceControl.executeIndex := 0.U
   entranceControl.schedulerComplete := false.B
   entranceControl.instCompleted := ((laneIndex ## 0.U(2.W)) >> csrInterface.vSew).asUInt >= csrInterface.vl
-  entranceControl.mask.valid := laneReq.bits.mask
-  entranceControl.mask.bits := maskRegInput
+  entranceControl.mask.valid := laneRequest.bits.mask
+  entranceControl.mask.bits := maskInput
   entranceControl.maskGroupedOrR := maskGroupedOrR
   entranceControl.vrfWriteMask := 0.U
   // todo: vStart(2,0) > lane index
@@ -796,51 +873,52 @@ class Lane(val parameter: LaneParameters) extends Module with SerializableModule
       0.U,
       Mux(
         entranceFormat.xType,
-        laneReq.bits.readFromScalar,
-        VecInit(Seq.fill(parameter.ELEN - 5)(laneReq.bits.vs1(4))).asUInt ## laneReq.bits.vs1
+        laneRequest.bits.readFromScalar,
+        VecInit(Seq.fill(parameter.datapathWidth - 5)(laneRequest.bits.vs1(4))).asUInt ## laneRequest.bits.vs1
       )
     )
-  val entranceInstType: UInt = laneReq.bits.instType
+  val entranceInstType: UInt = laneRequest.bits.instType
   // todo: 修改v0的和使用v0作为mask的指令需要产生冲突
   val typeReady: Bool = VecInit(
     instTypeVec.zip(controlValid).map { case (t, v) => (t =/= entranceInstType) || !v }
   ).asUInt.andR
-  val validRegulate: Bool = laneReq.valid && typeReady
-  laneReq.ready := !controlValid.head && typeReady && vrf.instWriteReport.ready
-  vrf.instWriteReport.valid := (laneReq.fire || (!laneReq.bits.st && laneReq.bits.ls)) && !entranceControl.instCompleted
+  val validRegulate: Bool = laneRequest.valid && typeReady
+  laneRequest.ready := !controlValid.head && typeReady && vrf.instWriteReport.ready
+  vrf.instWriteReport.valid := (laneRequest.fire || (!laneRequest.bits.store && laneRequest.bits.loadStore)) && !entranceControl.instCompleted
   when(!controlValid.head && (controlValid.asUInt.orR || validRegulate)) {
     controlValid := VecInit(controlValid.tail :+ validRegulate)
     source1 := VecInit(source1.tail :+ vs1entrance)
     control := VecInit(control.tail :+ entranceControl)
-    result := VecInit(result.tail :+ 0.U(parameter.ELEN.W))
-    source2 := VecInit(source2.tail :+ 0.U(parameter.ELEN.W))
-    source3 := VecInit(source3.tail :+ 0.U(parameter.ELEN.W))
+    result := VecInit(result.tail :+ 0.U(parameter.datapathWidth.W))
+    source2 := VecInit(source2.tail :+ 0.U(parameter.datapathWidth.W))
+    source3 := VecInit(source3.tail :+ 0.U(parameter.datapathWidth.W))
     crossWriteMaskHead := 0.U
     crossWriteMaskTail := 0.U
   }
   // 试图让vrf记录这一条指令的信息,拒绝了说明有还没解决的冲突
   vrf.flush := DontCare
-  vrf.instWriteReport.bits.instIndex := laneReq.bits.instIndex
+  vrf.instWriteReport.bits.instIndex := laneRequest.bits.instructionIndex
   vrf.instWriteReport.bits.offset := 0.U //todo
   vrf.instWriteReport.bits.vdOffset := 0.U
-  vrf.instWriteReport.bits.vd.bits := laneReq.bits.vd
-  vrf.instWriteReport.bits.vd.valid := !(laneReq.bits.initState.sWrite || laneReq.bits.st)
-  vrf.instWriteReport.bits.vs2 := laneReq.bits.vs2
-  vrf.instWriteReport.bits.vs1.bits := laneReq.bits.vs1
+  vrf.instWriteReport.bits.vd.bits := laneRequest.bits.vd
+  vrf.instWriteReport.bits.vd.valid := !(laneRequest.bits.initState.sWrite || laneRequest.bits.store)
+  vrf.instWriteReport.bits.vs2 := laneRequest.bits.vs2
+  vrf.instWriteReport.bits.vs1.bits := laneRequest.bits.vs1
   vrf.instWriteReport.bits.vs1.valid := entranceFormat.vType
-  vrf.instWriteReport.bits.ma := laneReq.bits.ma
+  // TODO: move ma to [[V]]
+  vrf.instWriteReport.bits.ma := laneRequest.bits.ma
   // 暂时认为ld都是无序写寄存器的
-  vrf.instWriteReport.bits.unOrderWrite := (laneReq.bits.ls && !laneReq.bits.st) || entranceFormat.otherUnit
-  vrf.instWriteReport.bits.seg.valid := laneReq.bits.ls && laneReq.bits.seg.orR
-  vrf.instWriteReport.bits.seg.bits := laneReq.bits.seg
-  vrf.instWriteReport.bits.eew := laneReq.bits.eew
-  vrf.instWriteReport.bits.ls := laneReq.bits.ls
-  vrf.instWriteReport.bits.st := laneReq.bits.st
+  vrf.instWriteReport.bits.unOrderWrite := (laneRequest.bits.loadStore && !laneRequest.bits.store) || entranceFormat.otherUnit
+  vrf.instWriteReport.bits.seg.valid := laneRequest.bits.loadStore && laneRequest.bits.segment.orR
+  vrf.instWriteReport.bits.seg.bits := laneRequest.bits.segment
+  vrf.instWriteReport.bits.eew := laneRequest.bits.loadStoreEEW
+  vrf.instWriteReport.bits.ls := laneRequest.bits.loadStore
+  vrf.instWriteReport.bits.st := laneRequest.bits.store
   vrf.instWriteReport.bits.narrow := entranceFormat.narrow
   vrf.instWriteReport.bits.widen := entranceFormat.Widen
   vrf.instWriteReport.bits.stFinish := false.B
   vrf.csrInterface := csrInterface
   vrf.lsuLastReport := lsuLastReport
-  vrf.bufferClear := bufferClear
-  endNotice := endNoticeVec.reduce(_ | _)
+  vrf.bufferClear := lsuVRFWriteBufferClear
+  instructionFinished := endNoticeVec.reduce(_ | _)
 }

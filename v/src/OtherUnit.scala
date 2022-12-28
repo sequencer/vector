@@ -3,13 +3,13 @@ package v
 import chisel3._
 import chisel3.util.{Fill, Mux1H, UIntToOH, Valid}
 
-class OtherUnitReq(param: LaneParameters) extends Bundle {
-  val src:        Vec[UInt] = Vec(2, UInt(param.ELEN.W))
+class OtherUnitReq(param: LaneParameter) extends Bundle {
+  val src:        Vec[UInt] = Vec(2, UInt(param.datapathWidth.W))
   val opcode:     UInt = UInt(3.W)
   val extendType: Valid[ExtendInstructionType] = Valid(new ExtendInstructionType)
   val imm:        UInt = UInt(3.W)
-  val groupIndex: UInt = UInt(param.groupSizeBits.W)
-  val laneIndex:  UInt = UInt(param.laneIndexBits.W)
+  val groupIndex: UInt = UInt(param.groupNumberWidth.W)
+  val laneIndex:  UInt = UInt(param.laneNumberWidth.W)
   val sign:       Bool = Bool()
 }
 
@@ -26,7 +26,7 @@ class OtherUnitResp(param: DataPathParam) extends Bundle {
   val ffoSuccess:  Bool = Bool()
 }
 
-class OtherUnit(param: LaneParameters) extends Module {
+class OtherUnit(param: LaneParameter) extends Module {
   val req:  OtherUnitReq = IO(Input(new OtherUnitReq(param)))
   val resp: OtherUnitResp = IO(Output(new OtherUnitResp(param.datePathParam)))
   val csr:  OtherUnitCsr = IO(Input(new OtherUnitCsr))
@@ -41,8 +41,8 @@ class OtherUnit(param: LaneParameters) extends Module {
   ffo.resultSelect := req.opcode
   popCount.src := req.src.head
 
-  val signValue:  Bool = req.src.head(param.ELEN - 1) && req.sign
-  val signExtend: UInt = Fill(param.ELEN, signValue)
+  val signValue:  Bool = req.src.head(param.datapathWidth - 1) && req.sign
+  val signExtend: UInt = Fill(param.datapathWidth, signValue)
 
   // clip 2sew -> sew
   // vSew 0 -> sew = 8 => log2(sew) = 4
@@ -60,12 +60,12 @@ class OtherUnit(param: LaneParameters) extends Module {
   val vd: Bool = (roundTail & req.src.head).orR
   // r
   val roundR:      Bool = Mux1H(UIntToOH(csr.vxrm), Seq(vds1, vds1 & (vLostLSB | vd), false.B, !vd & (vds1 | vLostLSB)))
-  val roundResult: UInt = (((signExtend ## req.src.head) >> clipSize).asUInt + roundR)(param.ELEN - 1, 0)
+  val roundResult: UInt = (((signExtend ## req.src.head) >> clipSize).asUInt + roundR)(param.datapathWidth - 1, 0)
 
   // gather: vSew = 0 -> vlMax = VLEN
   val gatherCheck: Bool = Mux1H(
     vSewOH,
-    Seq(req.src.head <= param.VLEN.U, req.src.head <= (param.VLEN / 2).U, req.src.head <= (param.VLEN / 4).U)
+    Seq(req.src.head <= param.vLen.U, req.src.head <= (param.vLen / 2).U, req.src.head <= (param.vLen / 4).U)
   )
   resp.gatherCheck := gatherCheck && opcodeOH(1)
 
