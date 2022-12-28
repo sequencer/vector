@@ -1,6 +1,6 @@
 # 大框图
 
-![](./rvv.drawio.svg)
+![](assets/rvv.drawio.svg)
 
 
 

@@ -5,3 +5,6 @@ test_run_dir/
 .metals/
 .vscode/
 cmake-build-*
+
+_book
+node_modules
