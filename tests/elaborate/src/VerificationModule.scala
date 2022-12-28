@@ -50,7 +50,7 @@ class VerificationModule(dut: V) extends TapModule {
         |  export "DPI-C" function dpiDumpWave;
         |  function dpiDumpWave(input string file);
         |   $$dumpfile(file);
-        |   $$dumpvars(2, $$root.dut);
+        |   $$dumpvars(0);
         |  endfunction;
         |
         |  export "DPI-C" function dpiFinish;

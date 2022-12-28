@@ -9,6 +9,11 @@ class TestBench extends RawModule {
   val dut = withClockAndReset(clock, reset) {
     Module(new V(VParam()))
   }
+  withClockAndReset(clock, reset) {
+    val coverModule = Module(new CoverModule(dut))
+  }
+  val monitor = Module(new Monitor(dut))
+
   val verificationModule = Module(new VerificationModule(dut))
   dut.req <> verificationModule.req
   dut.resp <> verificationModule.resp
