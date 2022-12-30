@@ -45,11 +45,11 @@
 | 010101 | | | |            | 010101 | | |             | 010101 | | |
 | 010110 | | | |            | 010110 | | |             | 010110 | | |
 | 010111 |V|X|I| vmerge/vmv | 010111 |V| | vcompress   | 010111 | |F| vfmerge/vfmv
-| 011000 |V|X|I| vmseq      | 011000 |V| | vmandnot    | 011000 |V|F| vmfeq
+| 011000 |V|X|I| vmseq      | 011000 |V| | vmandn      | 011000 |V|F| vmfeq
 | 011001 |V|X|I| vmsne      | 011001 |V| | vmand       | 011001 |V|F| vmfle
 | 011010 |V|X| | vmsltu     | 011010 |V| | vmor        | 011010 | | |
 | 011011 |V|X| | vmslt      | 011011 |V| | vmxor       | 011011 |V|F| vmflt
-| 011100 |V|X|I| vmsleu     | 011100 |V| | vmornot     | 011100 |V|F| vmfne
+| 011100 |V|X|I| vmsleu     | 011100 |V| | vmorn       | 011100 |V|F| vmfne
 | 011101 |V|X|I| vmsle      | 011101 |V| | vmnand      | 011101 | |F| vmfgt
 | 011110 | |X|I| vmsgtu     | 011110 |V| | vmnor       | 011110 | | |
 | 011111 | |X|I| vmsgt      | 011111 |V| | vmxnor      | 011111 | |F| vmfge
@@ -67,7 +67,7 @@
 | 100101 |V|X|I| vsll       | 100101 |V|X| vmul        | 100101 | | |
 | 100110 | | | |            | 100110 |V|X| vmulhsu     | 100110 | | |
 | 100111 |V|X| | vsmul      | 100111 |V|X| vmulh       | 100111 | |F| vfrsub
-|        | | |I| vmv<nr>r   |        | | |             |        | | |
+| 100111 | | |I| vmv<nr>r   |        | | |             |        | | |
 | 101000 |V|X|I| vsrl       | 101000 | | |             | 101000 |V|F| vfmadd
 | 101001 |V|X|I| vsra       | 101001 |V|X| vmadd       | 101001 |V|F| vfnmadd
 | 101010 |V|X|I| vssrl      | 101010 | | |             | 101010 |V|F| vfmsub
@@ -91,7 +91,7 @@
 | 110110 | | | |            | 110110 |V|X| vwsubu.w    | 110110 |V|F| vfwsub.w
 | 110111 | | | |            | 110111 |V|X| vwsub.w     | 110111 | | |
 | 111000 | | | |            | 111000 |V|X| vwmulu      | 111000 |V|F| vfwmul
-| 111001 | | | |            | 111001 | | |             | 111001 | | |      
+| 111001 | | | |            | 111001 | | |             | 111001 | | |
 | 111010 | | | |            | 111010 |V|X| vwmulsu     | 111010 | | |
 | 111011 | | | |            | 111011 |V|X| vwmul       | 111011 | | |
 | 111100 | | | |            | 111100 |V|X| vwmaccu     | 111100 |V|F| vfwmacc
@@ -116,7 +116,7 @@
 |  vs1  |
 
 | 00000 | vmv.x.s
-| 10000 | vpopc
+| 10000 | vcpop
 | 10001 | vfirst
 |===
 
