@@ -360,13 +360,87 @@ object DecodeTable {
     def genTable(op: Op): BitPat = if (op.name == "vid") y else n
   }
 
+  object uop extends Field {
+    def width: Int = 4
+
+    val mul: Seq[String] = Seq(
+      "mul", "ma", "ms"
+    )
+
+    def y: BitPat = BitPat.Y(1)
+    def genTable(op: Op): BitPat = {
+      val b2s = (b: Boolean) => if (b) "1" else "0"
+      val firstIndexContains = (xs: Iterable[String], s: String) =>
+        xs.map(s.indexOf).zipWithIndex.filter(_._1 != -1).head._2
+
+      val table = if (multiplier.genTable(op) == y) {
+        val high = op.name.contains("mulh")
+        val n = if (high) 3 else firstIndexContains(mul, op.name)
+        require(n < 4)
+        b2s(op.name.startsWith("vn")) + b2s(Seq("c", "cu", "cus", "csu").exists(op.name.endsWith)) +
+          ("00" + n.toBinaryString takeRight 2)
+      } else if (divider.genTable(op) == y) {
+        val n = firstIndexContains(divider.subs, op.name)
+        require(n < 2)
+        "?" * 3 + n.toBinaryString
+      } else if (adder.genTable(op) == y) {
+        val n = if (op.name.contains("sum")) 0 else firstIndexContains(adder.subs, op.name)
+        require(n < 16)
+        ("0000" + n.toBinaryString takeRight 4)
+      } else if (logic.genTable(op) == y) {
+        val isXnor = op.name == "vmxnor"
+        val isXor = op.name.contains("xor")
+        val n = if (isXnor || isXor) 2 else firstIndexContains(logic.subs, op.name)
+        require(n < 4)
+        b2s(op.name.startsWith("vmn")) +
+          b2s(isXnor || op.name.contains("not")) +
+          ("00" + n.toBinaryString takeRight 2)
+      } else if (shift.genTable(op) == y) {
+        val n = firstIndexContains(shift.subs, op.name)
+        require(n < 4)
+        "?" * 2 + ("00" + n.toBinaryString takeRight 2)
+      } else if (other.genTable(op) == y) {
+        val n = firstIndexContains(other.subs, op.name)
+        require(n < 8)
+        "0" + ("000" + n.toBinaryString takeRight 3)
+      } else {
+        // unreachable
+        require(false)
+        "?" * 4
+      }
+
+      BitPat("b" + table)
+    }
+  }
+
+  object specialUop extends Field {
+    def width: Int = 4
+
+    def y: BitPat = BitPat.Y(1)
+    def genTable(op: Op): BitPat = {
+      val b2s = (b: Boolean) => if (b) "1" else "0"
+      val table = "1" + (
+        if (ffo.genTable(op) == y)
+          "?" +
+            ("00" + ffo.subs.indexOf(op.name).toBinaryString takeRight 2)
+        else if (op.special.get.name == "VXUNARY0") {
+          val log2 = (x: Int) => (math.log10(x) / math.log10(2)).toInt
+          b2s(op.name.startsWith("vs")) +
+            ("00" + log2(op.name.last.toString.toInt).toBinaryString takeRight 2)
+        } else
+          "?" * 3
+        )
+      BitPat("b" + table)
+    }
+  }
+
   val all: Seq[Field] = Seq(
     logic, adder, shift, multiplier, divider, other,
     firstWiden, nr, red, reverse, narrow, widen, average, unsigned0, unsigned1,
     vtype, xtype,
-    // TODO: uop
-    targetRd, extend, mv, ffo, popCount, iota, id
-    // TODO: specialUop
+    uop,
+    targetRd, extend, mv, ffo, popCount, iota, id,
+    specialUop,
   )
 
   def bundle = new DecodeBundle(all)
