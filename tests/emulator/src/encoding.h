@@ -1,5 +1,7 @@
 #pragma once
 
+#include "svdpi.h"
+
 // Write this CSR to end simulation.
 constexpr uint32_t CSR_MSIMEND = 0x7cc;
 

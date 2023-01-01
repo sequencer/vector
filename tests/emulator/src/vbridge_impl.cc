@@ -3,7 +3,9 @@
 
 #include <disasm.h>
 
+#ifdef COSIM_VERILATOR
 #include <verilated.h>
+#endif
 
 #include "exceptions.h"
 #include "glog_exception_safe.h"
@@ -24,7 +26,9 @@ void VBridgeImpl::timeoutCheck() {
 void VBridgeImpl::dpiInitCosim() {
   google::InitGoogleLogging("emulator");
 
+#ifdef COSIM_VERILATOR
   ctx = Verilated::threadContextp();
+#endif
   LOG(INFO) << fmt::format("[{}] dpiInitCosim", getCycle());
   proc.reset();
   // TODO: remove this line, and use CSR write in the test code to enable this the VS field.

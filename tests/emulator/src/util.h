@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 
 #include "exceptions.h"
 #include "glog_exception_safe.h"

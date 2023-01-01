@@ -3,6 +3,7 @@
 #include <queue>
 #include <optional>
 #include <mutex>
+#include <list>
 #include <thread>
 #include <condition_variable>
 
@@ -11,8 +12,9 @@
 #ifdef COSIM_VERILATOR
 #include <verilated.h>
 #include <verilated_fst_c.h>
-#include <svdpi.h>
 #endif
+
+#include <svdpi.h>
 
 #include "spike_event.h"
 #include "simple_sim.h"
@@ -51,11 +53,13 @@ public:
   uint64_t get_t();
 
   // Simulator Calls
-#ifdef COSIM_VERILATOR
   uint64_t getCycle() {
+#ifdef COSIM_VERILATOR
     return ctx->time();
-  }
+#elif COSIM_VCS
+    return 0;  // TODO: impl getCycle
 #endif
+  }
 
   void dpiPokeInst(const VInstrInterfacePoke &v_instr, const VCsrInterfacePoke &v_csr, const VRespInterface &v_resp);
   void dpiPokeTL(const VTlInterfacePoke &v_tl_poke);

@@ -6,7 +6,9 @@
 #include <processor.h>
 #include <mmu.h>
 
+#ifdef COSIM_VERILATOR
 #include <verilated_fst_c.h>
+#endif
 
 #include "simple_sim.h"
 #include "vbridge_impl.h"

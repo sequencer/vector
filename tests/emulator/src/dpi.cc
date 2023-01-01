@@ -1,5 +1,7 @@
 #ifdef COSIM_VERILATOR
 #include <VTestBench__Dpi.h>
+#elif COSIM_VCS
+#include "vc_hdrs.h"
 #endif
 
 #include <csignal>
@@ -14,8 +16,17 @@
 
 static bool terminated = false;
 
-void sigint_handler(int s) {
+static void setScope() {
+#ifdef COSIM_VERILATOR
+  svSetScope(svGetScopeFromName("TOP.TestBench.verificationModule.verbatim"));
+#elif COSIM_VCS
+  svSetScope(svGetScopeFromName("TestBench.verificationModule.verbatim"));
+#endif
+};
+
+static void sigint_handler(int s) {
   terminated = true;
+  setScope();
   dpiFinish();
 }
 
@@ -25,16 +36,18 @@ void sigint_handler(int s) {
   } catch (ReturnException &e) { \
     terminated = true;                \
     LOG(INFO) << fmt::format("detect returning instruction, gracefully quit simulation");                  \
+    setScope(); \
     dpiFinish();                  \
   } catch (std::runtime_error &e) { \
     terminated = true;                \
     LOG(ERROR) << fmt::format("detect exception ({}), gracefully abort simulation", e.what());                 \
+    setScope(); \
     dpiError(e.what());  \
   }
 
 void VBridgeImpl::dpiDumpWave() {
   TRY({
-    svSetScope(svGetScopeFromName("TOP.TestBench.verificationModule.verbatim"));
+    setScope();
     ::dpiDumpWave((wave + ".fst").c_str());
   })
 }
