@@ -307,7 +307,10 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
   val instructionTypeVec: Vec[UInt] = Wire(Vec(parameter.chainingSize, UInt(parameter.executeUnitNum.W)))
 
   /** a instruction is finished in this lane. */
-  val instructionWillComplete: Vec[Bool] = Wire(Vec(parameter.chainingSize, Bool()))
+  val instructionExecuteFinished: Vec[Bool] = Wire(Vec(parameter.chainingSize, Bool()))
+
+  /** Instructions that read across lane will have an extra set of reads if vl is not aligned. */
+  val instructionCrossReadFinished: Bool = Wire(Bool())
 
   /** valid for requesting mask unit. */
   val maskRequestValids: Vec[Bool] = Wire(Vec(parameter.chainingSize, Bool()))
@@ -360,6 +363,47 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
 
   val vSewOrR: Bool = csrInterface.vSew.orR
   val vSew1H:  UInt = UIntToOH(csrInterface.vSew)
+  // todo: - 1 in [[v]]
+  val lastElementIndex: UInt = (csrInterface.vl - 1.U)(parameter.vlWidth - 2, 0)
+
+  /** For an instruction, the last group is not executed by all lanes,
+    * here is the last group of the instruction
+    * xxxxx xxx xx -> vsew = 0
+    * xxxxxx xxx x -> vsew = 1
+    * xxxxxxx xxx  -> vsew = 2
+    */
+  val lastGroupForInstruction: UInt = Mux1H(
+    vSew1H(2, 0),
+    Seq(
+      lastElementIndex(parameter.vlWidth - 2, parameter.laneNumberWidth + 2),
+      lastElementIndex(parameter.vlWidth - 2, parameter.laneNumberWidth + 1),
+      lastElementIndex(parameter.vlWidth - 2, parameter.laneNumberWidth)
+    )
+  )
+
+  /** Which lane the last element is in. */
+  val lastLaneIndex: UInt = Mux1H(
+    vSew1H(2, 0),
+    Seq(
+      lastElementIndex(parameter.laneNumberWidth + 2 - 1, 2),
+      lastElementIndex(parameter.laneNumberWidth + 1 - 1, 1),
+      lastElementIndex(parameter.laneNumberWidth - 1, 0)
+    )
+  )
+
+  /** Used to calculate the last group of mask, which will only be effective when [[isEndLane]] */
+  val lastElementExecuteIndex: UInt = Mux1H(
+    vSew1H(1, 0),
+    Seq(
+      lastElementIndex(1, 0),
+      lastElementIndex(0) ## false.B
+    )
+  )
+
+  /** The relative position of the last lane determines the processing of the last group. */
+  val lanePositionLargerThanEndLane: Bool = laneIndex > lastLaneIndex
+  val isEndLane:                     Bool = laneIndex === lastLaneIndex
+  val lastGroupForLane:              UInt = lastGroupForInstruction - lanePositionLargerThanEndLane
 
   /** when [[InstControlRecord.executeIndex]] reaches [[slotGroupFinishedIndex]], the group in the slot is finished.
     * 00 -> 11
@@ -369,6 +413,11 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
     * TODO: 64bit
     */
   val slotGroupFinishedIndex: UInt = !csrInterface.vSew(1) ## !vSewOrR
+  val lastGroupSlotGroupFinishedIndex: UInt = Mux(
+    isEndLane,
+    lastElementExecuteIndex,
+    slotGroupFinishedIndex
+  )
 
   /** queue for cross lane writing. */
   val crossLaneWriteQueue: Queue[VRFWriteRequest] = Module(
@@ -534,7 +583,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         val dataDepletion = record.executeIndex === slotGroupFinishedIndex || maskFilterEnd
 
         /** 这一组计算全完成了 */
-        val groupEnd = dataDepletion || instructionWillComplete(index)
+        val groupEnd = dataDepletion || instructionExecuteFinished(index)
 
         /** 计算当前这一组的 vrf mask
           * 已知：mask mask1H executeIndex
@@ -600,7 +649,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
             indexInLane ## laneIndex
           )
         )
-        instructionWillComplete(index) := nextElementIndex >= csrInterface.vl
+        instructionExecuteFinished(index) := nextElementIndex >= csrInterface.vl
         // 假如这个单元执行的是logic的类型的,请求应该是什么样子的
         val logicRequest = Wire(new LaneLogicRequest(parameter.datePathParam))
         logicRequest.src.head := finalSource2
@@ -717,7 +766,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         )
         vrfWriteArbiter(index).bits.offset := record.groupCounter
         vrfWriteArbiter(index).bits.data := result(index)
-        vrfWriteArbiter(index).bits.last := instructionWillComplete(index)
+        vrfWriteArbiter(index).bits.last := instructionExecuteFinished(index)
         vrfWriteArbiter(index).bits.instructionIndex := record.originalInformation.instructionIndex
         vrfWriteArbiter(index).bits.mask := record.vrfWriteMask
         when(vrfWriteFire(index)) {
@@ -726,7 +775,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         instructionFinishedVec(index) := 0.U(parameter.chainingSize.W)
         val maskUnhindered = maskRequestFireOH(index) || !maskNeedUpdate
         when((record.state.asUInt.andR && maskUnhindered) || record.instCompleted) {
-          when(instructionWillComplete(index) || record.instCompleted) {
+          when(instructionExecuteFinished(index) || record.instCompleted) {
             slotOccupied(index) := false.B
             when(slotOccupied(index)) {
               instructionFinishedVec(index) := UIntToOH(
@@ -762,6 +811,14 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         val decodeResult: DecodeBundle = record.originalInformation.decodeResult
         // TODO: use decode
         val needCrossRead = decodeResult(Decoder.firstWiden) || decodeResult(Decoder.narrow)
+
+        /** Each group needs a state machine,
+          * so we will ignore the effect of mask to jump to the next group at the end of this group
+          * [[needCrossRead]]: We need to read data to another lane
+          * [[record.originalInformation.special]]: We need to synchronize with [[V]] every group
+          */
+        val alwaysNextGroup: Bool = needCrossRead ||
+          record.originalInformation.special
 
         /** select from VFU, send to [[result]], [[crossWriteResultLSBHalf]], [[crossWriteResultMSBHalf]]. */
         val dataDequeue: UInt = Mux1H(instructionTypeVec(index), executeDequeueData)
@@ -1036,9 +1093,21 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         val nextOrR: Bool = next1H.orR
         // nextIndex.getWidth = 5
         val nextIndex: UInt = OHToUInt(next1H)
+        /**
+          * 一组mask有 [[parameter.maskGroupWidth]] 个bit
+          * 每0组数据执行 4, 2, 1 个 element
+          * */
+        val lastGroupForMask = Mux1H(
+          vSew1H(2, 0),
+          Seq(
+            record.groupCounter(log2Ceil(parameter.maskGroupWidth / 4) - 1, 0).andR,
+            record.groupCounter(log2Ceil(parameter.maskGroupWidth / 2) - 1, 0).andR,
+            record.groupCounter(log2Ceil(parameter.maskGroupWidth) - 1, 0).andR,
+          )
+        )
 
         /** 这一组的mask已经没有剩余了 */
-        val maskNeedUpdate = !nextOrR
+        val maskNeedUpdate = !nextOrR && (!alwaysNextGroup || lastGroupForMask)
         val nextGroupCountMSB: UInt = Mux1H(
           vSew1H(1, 0),
           Seq(
@@ -1049,17 +1118,39 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         val indexInLane = nextGroupCountMSB ## nextIndex
         // csrInterface.vSew 只会取值0, 1, 2,需要特别处理移位
         val nextIntermediateVolume = (indexInLane << csrInterface.vSew).asUInt
-        val nextGroupCount = nextIntermediateVolume(parameter.groupNumberWidth + 1, 2)
-        val nextExecuteIndex = nextIntermediateVolume(1, 0)
+
+        /** mask 后 ffo 计算出来的下一次计算的 element 属于哪一个 group */
+        val nextGroupMasked: UInt = nextIntermediateVolume(parameter.groupNumberWidth + 1, 2)
+        val nextGroupCount = Mux(
+          alwaysNextGroup,
+          record.groupCounter + 1.U,
+          nextGroupMasked
+        )
 
         /** 虽然没有计算完一组,但是这一组剩余的都被mask去掉了 */
-        val maskFilterEnd = record.originalInformation.mask && (nextGroupCount =/= record.groupCounter)
+        val maskFilterEnd = record.originalInformation.mask && (nextGroupMasked =/= record.groupCounter)
 
-        /** 需要一个除vl导致的end来决定下一个的 element index 是什么 */
-        val dataDepletion = record.executeIndex === slotGroupFinishedIndex || maskFilterEnd
+        /** 这是会执行的最后一组 */
+        val lastExecuteGroup: Bool = lastGroupForLane === record.groupCounter
 
-        /** 这一组计算全完成了 */
-        val groupEnd = dataDepletion || instructionWillComplete(index)
+        /**
+          * 需要一个除vl导致的end来决定下一个的 element index 是什么
+          * 在vl没对齐的情况下，最后一组的结束的时候的 [[record.executeIndex]] 需要修正
+          */
+        val groupEnd = record.executeIndex === Mux(
+          lastExecuteGroup,
+          lastGroupSlotGroupFinishedIndex,
+          slotGroupFinishedIndex
+        ) || maskFilterEnd
+
+        /** 只会发生在跨lane读 */
+        val waitCrossRead = lastGroupForLane < record.groupCounter
+
+        val nextExecuteIndex = Mux(
+          alwaysNextGroup && groupEnd,
+          0.U,
+          nextIntermediateVolume(1, 0)
+        )
 
         /** 计算当前这一组的 vrf mask
           * 已知：mask mask1H executeIndex
@@ -1129,18 +1220,15 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
           CollapseOperand(source1(index), decodeResult(Decoder.vtype), !decodeResult(Decoder.unsigned0))
 
         /** source2 一定是V类型的 */
-        val finalSource2 = if (index == 0) {
-          val doubleCollapse = CollapseDoubleOperand(!decodeResult(Decoder.unsigned1))
-          dontTouch(doubleCollapse)
-          Mux(
-            needCrossRead,
-            doubleCollapse,
-            CollapseOperand(source2(index), true.B, !decodeResult(Decoder.unsigned1))
-          )
-
-        } else {
+        val doubleCollapse = CollapseDoubleOperand(!decodeResult(Decoder.unsigned1))
+        val finalSource2 = Mux(
+          needCrossRead,
+          doubleCollapse,
           CollapseOperand(source2(index), true.B, !decodeResult(Decoder.unsigned1))
-        }
+        )
+        instructionExecuteFinished(index) := waitCrossRead ||
+          (lastExecuteGroup && groupEnd)
+        instructionCrossReadFinished := lastGroupForInstruction === record.groupCounter
 
         /** source3 有两种：adc & ma, c等处理mask的时候再处理 */
         val finalSource3 = CollapseOperand(source3(index))
@@ -1149,15 +1237,6 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         logicRequest.src.head := finalSource2
         logicRequest.src.last := finalSource1
         logicRequest.opcode := decodeResult(Decoder.uop)
-        val nextElementIndex = Mux1H(
-          vSew1H,
-          Seq(
-            indexInLane(indexInLane.getWidth - 1, 2) ## laneIndex ## indexInLane(1, 0),
-            indexInLane(indexInLane.getWidth - 1, 1) ## laneIndex ## indexInLane(0),
-            indexInLane ## laneIndex
-          )
-        )
-        instructionWillComplete(index) := nextElementIndex >= csrInterface.vl
         // 在手动做Mux1H
         logicRequests(index) := maskAnd(
           slotOccupied(index) && decodeResult(Decoder.logic) && !decodeResult(Decoder.other),
@@ -1270,12 +1349,8 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         )
         vrfWriteArbiter(index).bits.offset := record.groupCounter
         vrfWriteArbiter(index).bits.data := result(index)
-        vrfWriteArbiter(index).bits.last := instructionWillComplete(index)
+        vrfWriteArbiter(index).bits.last := instructionExecuteFinished(index)
         vrfWriteArbiter(index).bits.instructionIndex := record.originalInformation.instructionIndex
-        val notLastWrite = !instructionWillComplete(index)
-        // 判断这一个lane是否在body与tail的分界线上,只有分界线上的才需要特别计算mask
-        val dividingLine:    Bool = (csrInterface.vl << csrInterface.vSew).asUInt(4, 2) === laneIndex
-        val useOriginalMask: Bool = notLastWrite || !dividingLine
         vrfWriteArbiter(index).bits.mask := record.vrfWriteMask
         when(vrfWriteFire(index)) {
           record.state.sWrite := true.B
@@ -1283,7 +1358,11 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         instructionFinishedVec(index) := 0.U(parameter.chainingSize.W)
         val maskUnhindered = maskRequestFireOH(index) || !maskNeedUpdate
         when((record.state.asUInt.andR && maskUnhindered) || record.instCompleted) {
-          when(instructionWillComplete(index) || record.instCompleted) {
+          when(
+            (instructionExecuteFinished(
+              index
+            ) || record.instCompleted) && (!needCrossRead || instructionCrossReadFinished)
+          ) {
             slotOccupied(index) := false.B
             when(slotOccupied(index)) {
               instructionFinishedVec(index) := UIntToOH(
@@ -1350,7 +1429,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
     crossLaneWriteQueue.io.enq.bits.vd := slotControl.head.originalInformation.vd + writeBusPort.enq.bits.counter(3, 1)
     crossLaneWriteQueue.io.enq.bits.offset := writeBusPort.enq.bits.counter ## writeBusPort.enq.bits.tail
     crossLaneWriteQueue.io.enq.bits.data := writeBusPort.enq.bits.data
-    crossLaneWriteQueue.io.enq.bits.last := instructionWillComplete.head && writeBusPort.enq.bits.tail
+    crossLaneWriteQueue.io.enq.bits.last := instructionExecuteFinished.head && writeBusPort.enq.bits.tail
     crossLaneWriteQueue.io.enq.bits.instructionIndex := slotControl.head.originalInformation.instructionIndex
     crossLaneWriteQueue.io.enq.bits.mask := FillInterleaved(2, writeBusPort.enq.bits.mask)
     //writeBusPort.enq.bits
