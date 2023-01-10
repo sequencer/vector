@@ -937,6 +937,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         crossLaneRead.bits.tail := laneIndex(0)
         crossLaneRead.bits.from := laneIndex
         crossLaneRead.bits.instIndex := record.originalInformation.instructionIndex
+        crossLaneRead.bits.counter := record.groupCounter
         crossLaneRead.bits.data := Mux(tryToSendHead, crossReadLSBOut, crossReadMSBOut)
         crossLaneRead.valid := tryToSendHead || tryToSendTail
 
@@ -1399,15 +1400,16 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
   // 处理读环的
   {
     val readBusDataReg: ValidIO[ReadBusData] = RegInit(0.U.asTypeOf(Valid(new ReadBusData(parameter))))
-    val readBusIndexMatch = readBusPort.enq.bits.target === laneIndex
-    readBusDequeue.valid := readBusIndexMatch && readBusPort.enq.valid
+    val readBusDequeueMatch = readBusPort.enq.bits.target === laneIndex &&
+      readBusPort.enq.bits.counter === slotControl.head.groupCounter
+    readBusDequeue.valid := readBusDequeueMatch && readBusPort.enq.valid
     readBusDequeue.bits := readBusPort.enq.bits
     // 暂时优先级策略是环上的优先
     readBusPort.enq.ready := true.B
     readBusDataReg.valid := false.B
 
     when(readBusPort.enq.valid) {
-      when(!readBusIndexMatch) {
+      when(!readBusDequeueMatch) {
         readBusDataReg.valid := true.B
         readBusDataReg.bits := readBusPort.enq.bits
       }

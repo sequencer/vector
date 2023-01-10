@@ -217,6 +217,7 @@ class ReadBusData(param: LaneParameter) extends Bundle {
   val from:      UInt = UInt(param.laneNumberWidth.W)
   val target:    UInt = UInt(param.laneNumberWidth.W)
   val instIndex: UInt = UInt(param.instructionIndexSize.W)
+  val counter:   UInt = UInt(param.groupNumberWidth.W)
 }
 
 class WriteBusData(param: LaneParameter) extends Bundle {
