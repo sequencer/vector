@@ -9,6 +9,9 @@ _start:
     lui x30, 1
     auipc x31, 0
 
+    vmv.v.i v1, 0
+    vmv.v.i v5, 0
+
 add_test:
     vadd.vi v0, v1, 10
     vadd.vv v2, v1, v1
