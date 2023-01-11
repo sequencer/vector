@@ -9,7 +9,7 @@ import scala.util.matching.Regex
 case class RawOp(tpe: String, funct6: String, funct3s: Seq[String], name: String)
 case class SpecialAux(name: String, vs: Int, value: String)
 case class Op(tpe: String, funct6: String, funct3: String,
-              name: String, special: Option[SpecialAux]) extends Instruction {
+              name: String, special: Option[SpecialAux]) extends DecodePattern {
   val funct3Map: Map[String, String] = Map(
     "IV" -> "000",
     "IX" -> "100",
