@@ -5,6 +5,8 @@ import chisel3.experimental.{SerializableModule, SerializableModuleParameter}
 import chisel3.util._
 import chisel3.util.experimental.decode.DecodeBundle
 
+import scala.annotation.unused
+
 object LaneParameter {
   implicit def rwP: upickle.default.ReadWriter[LaneParameter] = upickle.default.macroRW
 }
@@ -1146,6 +1148,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
 
         /** 只会发生在跨lane读 */
         val waitCrossRead = lastGroupForLane < record.groupCounter
+        val lastVRFWrite: Bool = lastGroupForLane < nextGroupCount
 
         val nextExecuteIndex = Mux(
           alwaysNextGroup && groupEnd,
@@ -1229,7 +1232,7 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         )
         instructionExecuteFinished(index) := waitCrossRead ||
           (lastExecuteGroup && groupEnd)
-        instructionCrossReadFinished := lastGroupForInstruction === record.groupCounter
+        instructionCrossReadFinished := waitCrossRead && readFinish
 
         /** source3 有两种：adc & ma, c等处理mask的时候再处理 */
         val finalSource3 = CollapseOperand(source3(index))
@@ -1350,7 +1353,8 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         )
         vrfWriteArbiter(index).bits.offset := record.groupCounter
         vrfWriteArbiter(index).bits.data := result(index)
-        vrfWriteArbiter(index).bits.last := instructionExecuteFinished(index)
+        // todo: 是否条件有多余
+        vrfWriteArbiter(index).bits.last := instructionExecuteFinished(index) || lastVRFWrite
         vrfWriteArbiter(index).bits.instructionIndex := record.originalInformation.instructionIndex
         vrfWriteArbiter(index).bits.mask := record.vrfWriteMask
         when(vrfWriteFire(index)) {
@@ -1358,12 +1362,14 @@ class Lane(val parameter: LaneParameter) extends Module with SerializableModule[
         }
         instructionFinishedVec(index) := 0.U(parameter.chainingSize.W)
         val maskUnhindered = maskRequestFireOH(index) || !maskNeedUpdate
-        when((record.state.asUInt.andR && maskUnhindered) || record.instCompleted) {
-          when(
-            (instructionExecuteFinished(
-              index
-            ) || record.instCompleted) && (!needCrossRead || instructionCrossReadFinished)
-          ) {
+        val stateCheck = Mux(
+          waitCrossRead,
+          readFinish,
+          record.state.asUInt.andR && maskUnhindered
+        )
+        val crossReadReady: Bool = !needCrossRead || instructionCrossReadFinished
+        when(stateCheck || record.instCompleted) {
+          when((instructionExecuteFinished(index) && crossReadReady) || record.instCompleted) {
             slotOccupied(index) := false.B
             when(slotOccupied(index)) {
               instructionFinishedVec(index) := UIntToOH(
